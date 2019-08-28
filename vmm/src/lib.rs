@@ -52,7 +52,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Barrier, RwLock};
+use std::sync::{Arc, Barrier, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -98,6 +98,7 @@ use vmm_config::net::{
 #[cfg(feature = "vsock")]
 use vmm_config::vsock::{VsockDeviceConfig, VsockDeviceConfigs, VsockError};
 use vstate::{Vcpu, Vm};
+use devices::bus::RawIOHandler;
 
 /// Default guest kernel command line:
 /// - `reboot=k` shut down the guest on reboot, instead of well... rebooting;
@@ -1143,6 +1144,19 @@ impl Vmm {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn get_serial_device(&self) -> Option<Arc<Mutex<devices::legacy::Serial>>> {
+        Some(self.legacy_device_manager.stdio_serial.clone())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn get_serial_device(&self) -> Option<Arc<Mutex<devices::legacy::Serial>>> {
+        Arc::new(self.mmio_device_manager
+            .as_ref()
+            .unwrap()
+            .get_device(DeviceType::Serial, "uart"))
+    }
+
     #[cfg(target_arch = "aarch64")]
     fn get_mmio_device_info(&self) -> Option<&HashMap<(DeviceType, String), MMIODeviceInfo>> {
         if let Some(ref device_manager) = self.mmio_device_manager {
@@ -1551,14 +1565,22 @@ impl Vmm {
                             self.epoll_context.disable_stdin_event();
                         }
                         Ok(count) => {
-                            // Use expect() to panic if another thread panicked
-                            // while holding the lock.
-                            self.legacy_device_manager
-                                .stdio_serial
-                                .lock()
-                                .expect("Failed to process stdin event due to poisoned lock")
-                                .queue_input_bytes(&out[..count])
-                                .map_err(Error::Serial)?;
+                            match self.get_serial_device() {
+                                Some(serial) => {
+                                    // Use expect() to panic if another thread panicked
+                                    // while holding the lock.
+                                    serial
+                                        .lock()
+                                        .expect(
+                                            "Failed to process stdin event due to poisoned lock",
+                                        )
+                                        .raw_input(&out[..count])
+                                        .map_err(Error::Serial)?;
+                                }
+                                None => warn!(
+                                    "Unable to handle stdin event: no serial device available"
+                                ),
+                            }
                         }
                     }
                 }

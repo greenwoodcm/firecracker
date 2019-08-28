@@ -27,11 +27,11 @@ extern crate virtio_gen;
 use rate_limiter::Error as RateLimiterError;
 use std::io;
 
-mod bus;
+pub mod bus;
 pub mod legacy;
 pub mod virtio;
 
-pub use self::bus::{Bus, BusDevice, Error as BusError};
+pub use self::bus::{Bus, BusDevice, RawIOHandler, Error as BusError};
 use virtio::AsAny;
 
 pub type DeviceEventT = u16;

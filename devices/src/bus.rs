@@ -13,6 +13,7 @@ use std::fmt;
 use std::result;
 use std::sync::{Arc, Mutex};
 use virtio::AsAny;
+use std::io;
 
 /// Trait for devices that respond to reads or writes in an arbitrary address space.
 ///
@@ -26,6 +27,14 @@ pub trait BusDevice: AsAny + Send {
     fn write(&mut self, offset: u64, data: &[u8]) {}
     /// Triggers the `irq_mask` interrupt on this device
     fn interrupt(&self, irq_mask: u32) {}
+}
+
+// Trait for devices that handle raw non-blocking I/O requests.
+pub trait RawIOHandler: {
+    // Send raw input to this device.
+    fn raw_input(&mut self, _data: &[u8]) -> io::Result<()> { Ok(()) }
+    // Receive raw output from this device.
+    fn raw_output(&mut self, _data: &mut [u8]) -> io::Result<()> { Ok(()) }
 }
 
 #[derive(Debug)]
