@@ -16,6 +16,9 @@ use arch::DeviceType;
 use devices;
 use devices::virtio::TYPE_BLOCK;
 use devices::BusDevice;
+
+#[cfg(target_arch = "aarch64")]
+use devices::RawIOHandler;
 use kernel_cmdline;
 use kvm_ioctls::{IoEventAddress, VmFd};
 use memory_model::GuestMemory;
@@ -81,6 +84,8 @@ pub struct MMIODeviceManager {
     irq: u32,
     last_irq: u32,
     id_to_dev_info: HashMap<(DeviceType, String), MMIODeviceInfo>,
+    #[cfg(target_arch = "aarch64")]
+    raw_io_handlers: HashMap<(DeviceType, String), Arc<Mutex<RawIOHandler>>>,
 }
 
 impl MMIODeviceManager {
@@ -100,6 +105,8 @@ impl MMIODeviceManager {
             last_irq: irq_interval.1,
             bus: devices::Bus::new(),
             id_to_dev_info: HashMap::new(),
+            #[cfg(target_arch = "aarch64")]
+            raw_io_handlers: HashMap::new(),
         }
     }
 
@@ -183,12 +190,19 @@ impl MMIODeviceManager {
             Some(1),
         );
 
+        let bus_device = Arc::new(Mutex::new(device));
+        let raw_io_device = bus_device.clone();
+
         vm.register_irqfd(com_evt.as_raw_fd(), self.irq)
             .map_err(Error::RegisterIrqFd)?;
 
         self.bus
-            .insert(device, self.mmio_base, MMIO_LEN)
+            .insert(bus_device, self.mmio_base, MMIO_LEN)
             .map_err(|err| Error::BusError(err))?;
+
+        // register the RawIOHandler trait
+        self.raw_io_handlers
+            .insert((DeviceType::Serial, "uart".to_string()), raw_io_device);
 
         cmdline
             .insert("earlycon", &format!("uart,mmio,0x{:08x}", self.mmio_base))
@@ -262,6 +276,21 @@ impl MMIODeviceManager {
             if let Some((_, device)) = self.bus.get_device(dev_info.addr) {
                 return Some(device);
             }
+        }
+        None
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn get_raw_io_device(
+        &self,
+        device_type: DeviceType,
+        device_id: &str,
+    ) -> Option<&Mutex<RawIOHandler>> {
+        if let Some(raw_io_device) = self
+            .raw_io_handlers
+            .get(&(device_type, device_id.to_string()))
+        {
+            return Some(raw_io_device);
         }
         None
     }

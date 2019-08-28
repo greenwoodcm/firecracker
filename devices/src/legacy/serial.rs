@@ -12,6 +12,7 @@ use logger::{Metric, METRICS};
 use sys_util::EventFd;
 
 use BusDevice;
+use RawIOHandler;
 
 const LOOP_SIZE: usize = 0x40;
 
@@ -54,7 +55,7 @@ const DEFAULT_BAUD_DIVISOR: u16 = 12; // 9600 bps
 /// Emulates serial COM ports commonly seen on x86 I/O ports 0x3f8/0x2f8/0x3e8/0x2e8.
 ///
 /// This can optionally write the guest's output to a Write trait object. To send input to the
-/// guest, use `queue_input_bytes`.
+/// guest, use `raw_output`.
 pub struct Serial {
     interrupt_enable: u8,
     interrupt_identification: u8,
@@ -105,16 +106,6 @@ impl Serial {
     /// Constructs a Serial port with no connected output.
     pub fn new_sink(interrupt_evt: EventFd, data_len: Option<usize>) -> Serial {
         Self::new(interrupt_evt, None, data_len)
-    }
-
-    /// Queues raw bytes for the guest to read and signals the interrupt if the line status would
-    /// change.
-    pub fn queue_input_bytes(&mut self, c: &[u8]) -> io::Result<()> {
-        if !self.is_loop() {
-            self.in_buffer.extend(c);
-            self.recv_data()?;
-        }
-        Ok(())
     }
 
     fn is_dlab_set(&self) -> bool {
@@ -199,6 +190,16 @@ impl Serial {
             MCR => self.modem_control = v,
             SCR => self.scratch = v,
             _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl RawIOHandler for Serial {
+    fn raw_input(&mut self, data: &[u8]) -> io::Result<()> {
+        if !self.is_loop() {
+            self.in_buffer.extend(data);
+            self.recv_data()?;
         }
         Ok(())
     }
@@ -310,7 +311,7 @@ mod tests {
         // counter doesn't change (for 0 it blocks)
         assert!(intr_evt.write(1).is_ok());
         serial.write(u64::from(IER), &[IER_RECV_BIT]);
-        serial.queue_input_bytes(&[b'a', b'b', b'c']).unwrap();
+        serial.raw_output(&[b'a', b'b', b'c']).unwrap();
 
         assert_eq!(intr_evt.read().unwrap(), 2);
 
