@@ -98,6 +98,7 @@ use vmm_config::net::{
 #[cfg(feature = "vsock")]
 use vmm_config::vsock::{VsockDeviceConfig, VsockDeviceConfigs, VsockError};
 use vstate::{Vcpu, Vm};
+use devices::bus::RawIOHandler;
 
 /// Default guest kernel command line:
 /// - `reboot=k` shut down the guest on reboot, instead of well... rebooting;
@@ -1150,10 +1151,10 @@ impl Vmm {
 
     #[cfg(target_arch = "aarch64")]
     fn get_serial_device(&self) -> Option<Arc<Mutex<devices::legacy::Serial>>> {
-        self.mmio_device_manager
+        Arc::new(self.mmio_device_manager
             .as_ref()
             .unwrap()
-            .get_device(DeviceType::Serial, "uart")
+            .get_device(DeviceType::Serial, "uart"))
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1573,7 +1574,7 @@ impl Vmm {
                                         .expect(
                                             "Failed to process stdin event due to poisoned lock",
                                         )
-                                        .queue_input_bytes(&out[..count])
+                                        .raw_input(&out[..count])
                                         .map_err(Error::Serial)?;
                                 }
                                 None => warn!(
