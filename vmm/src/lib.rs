@@ -62,7 +62,7 @@ use timerfd::{ClockId, SetTimeFlags, TimerFd, TimerState};
 
 #[cfg(target_arch = "aarch64")]
 use arch::DeviceType;
-use device_manager::legacy::LegacyDeviceManager;
+use device_manager::legacy::PortIODeviceManager;
 #[cfg(target_arch = "aarch64")]
 use device_manager::mmio::MMIODeviceInfo;
 use device_manager::mmio::MMIODeviceManager;
@@ -770,7 +770,7 @@ struct Vmm {
 
     // Guest VM devices.
     mmio_device_manager: Option<MMIODeviceManager>,
-    legacy_device_manager: LegacyDeviceManager,
+    legacy_device_manager: PortIODeviceManager,
 
     // Device configurations.
     // If there is a Root Block Device, this should be added as the first element of the list.
@@ -830,7 +830,7 @@ impl Vmm {
             exit_evt: None,
             vm,
             mmio_device_manager: None,
-            legacy_device_manager: LegacyDeviceManager::new().map_err(Error::CreateLegacyDevice)?,
+            legacy_device_manager: PortIODeviceManager::new().map_err(Error::CreateLegacyDevice)?,
             block_device_configs,
             network_interface_configs: NetworkInterfaceConfigs::new(),
             #[cfg(feature = "vsock")]
