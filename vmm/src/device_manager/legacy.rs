@@ -4,7 +4,7 @@
 // Portions Copyright 2017 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
-
+#![cfg(target_arch = "x86_64")]
 use std::fmt;
 use std::io::{self, stdout};
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ use sys_util::EventFd;
 #[cfg(target_arch = "x86_64")]
 use sys_util::Terminal;
 
-/// Errors corresponding to the `LegacyDeviceManager`.
+/// Errors corresponding to the `PortIODeviceManager`.
 #[derive(Debug)]
 pub enum Error {
     /// Cannot add legacy device to Bus.
@@ -39,10 +39,10 @@ impl fmt::Display for Error {
 
 type Result<T> = ::std::result::Result<T, Error>;
 
-/// The `LegacyDeviceManager` is a wrapper that is used for registering legacy devices
+/// The `PortIODeviceManager` is a wrapper that is used for registering legacy devices
 /// on an I/O Bus. It currently manages the uart and i8042 devices.
 /// The `LegacyDeviceManger` should be initialized only by using the constructor.
-pub struct LegacyDeviceManager {
+pub struct PortIODeviceManager {
     pub io_bus: devices::Bus,
     pub stdio_serial: Arc<Mutex<devices::legacy::Serial>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
@@ -53,7 +53,7 @@ pub struct LegacyDeviceManager {
     pub stdin_handle: io::Stdin,
 }
 
-impl LegacyDeviceManager {
+impl PortIODeviceManager {
     /// Create a new DeviceManager handling legacy devices (uart, i8042).
     pub fn new() -> Result<Self> {
         let io_bus = devices::Bus::new();
@@ -73,7 +73,7 @@ impl LegacyDeviceManager {
             kbd_evt.try_clone().unwrap(),
         )));
 
-        Ok(LegacyDeviceManager {
+        Ok(PortIODeviceManager {
             io_bus,
             stdio_serial,
             i8042,
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_register_legacy_devices() {
-        let ldm = LegacyDeviceManager::new();
+        let ldm = PortIODeviceManager::new();
         assert!(ldm.is_ok());
         assert!(&ldm.unwrap().register_devices().is_ok());
         // we need to reset the terminal otherwise stdin will remain in raw mode
