@@ -259,17 +259,12 @@ impl VirtioDevice for Block {
         &mut self.queues
     }
 
-    fn get_queue_events(&self) -> Vec<EventFd> {
-        vec![self
-            .queue_evt
-            .try_clone()
-            .expect("Unable to clone queue event fd.")]
+    fn get_queue_events(&self) -> Result<Vec<EventFd>, std::io::Error> {
+        Ok(vec![self.queue_evt.try_clone()?])
     }
 
-    fn get_interrupt(&self) -> EventFd {
-        self.interrupt_evt
-            .try_clone()
-            .expect("Failed to clone event fd")
+    fn get_interrupt(&self) -> Result<EventFd, std::io::Error> {
+        Ok(self.interrupt_evt.try_clone()?)
     }
 
     /// Returns the current device interrupt status.

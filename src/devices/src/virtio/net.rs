@@ -754,17 +754,17 @@ impl VirtioDevice for Net {
         &mut self.queues
     }
 
-    fn get_queue_events(&self) -> Vec<EventFd> {
-        self.queue_evts
-            .iter()
-            .map(|efd| efd.try_clone().expect("Cannot clone event fd"))
-            .collect()
+    fn get_queue_events(&self) -> std::io::Result<Vec<EventFd>> {
+        let mut queue_evts_copy = Vec::new();
+        for evt in self.queue_evts.iter() {
+            queue_evts_copy.push(evt.try_clone()?);
+        }
+
+        Ok(queue_evts_copy)
     }
 
-    fn get_interrupt(&self) -> EventFd {
-        self.interrupt_evt
-            .try_clone()
-            .expect("Cannot clone event fd")
+    fn get_interrupt(&self) -> std::io::Result<EventFd> {
+        Ok(self.interrupt_evt.try_clone()?)
     }
 
     fn get_interrupt_status(&self) -> Arc<AtomicUsize> {
