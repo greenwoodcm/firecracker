@@ -17,6 +17,32 @@ use std::path::Path;
 
 const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 
+/// Firecracker snapshot format version 1.
+///  
+///  |----------------------------|
+///  |         SnapshotHdr        |
+///  |----------------------------|
+///  |       SnapshotMetadata     |
+///  |----------------------------|
+///  |          DataBlob          |
+///  |----------------------------|
+/// 
+/// 
+/// The header contains snapshot format version, firecracker version
+/// and a description string.
+/// The metadata stores a vector of SnapshotProp entries which describe
+/// the data contained in the datablob. Each property id is unique in its 
+/// SnapshotPropKind space. The version field indicates the property struct 
+/// version to be used when deserializing it. The offset and len fields refer
+/// to the serialized struct location and size within the DataBlob.
+/// 
+/// The snapshot engine works as a data store, properties are created/read
+/// using get/set_snapshot_property or using the SnapshotAdapter trait.
+/// 
+/// Loading a snapshot does not trigger any version translation, it simply
+/// loads all the metadata and uses it to create u8 slices for each property.
+/// 
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SnapshotPropKind {
     CONFIG,
