@@ -9,6 +9,7 @@ extern crate syn;
 
 extern crate proc_macro;
 extern crate proc_macro2;
+extern crate array_tool;
 
 use proc_macro::TokenStream;
 use syn::*;
@@ -20,7 +21,9 @@ use std::io::prelude::*;
 use std::io::{Read, Write};
 use std::path::Path;
 
-#[derive(Debug)]
+use array_tool::vec::Intersect;
+
+#[derive(Debug, Eq, PartialEq, Clone)]
 struct SnapshotFieldAttr {
     name: String, 
     value: syn::Lit,
@@ -28,7 +31,7 @@ struct SnapshotFieldAttr {
 
 // Describes a structure type and fields.
 // Is used as input for computing the translation code.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct StructDescriptor {
     ty: String,
     version: u16,
@@ -49,10 +52,6 @@ fn get_field_attributes(attribute: &syn::Attribute) -> Vec<SnapshotFieldAttr> {
             if meta_list.path.segments[0].ident.to_string() == "snapshot" {
                 // Fetch the specific attribute name
                 for nested_attribute in meta_list.nested {
-                    // let snapshot_field_attr = SnapshotFieldAttr {
-                    //     name:
-                    // }
-
                     match nested_attribute {
                         syn::NestedMeta::Meta(nested_meta) => {
                             match nested_meta {
@@ -77,9 +76,26 @@ fn get_field_attributes(attribute: &syn::Attribute) -> Vec<SnapshotFieldAttr> {
         }
         _ => {}
     }
-    // panic!("{:?}", meta);
 
     field_attributes
+}
+
+fn get_struct_version(struct_item: &syn::ItemStruct) -> u16 {
+    // Scan struct attrs.
+    for attr in &struct_item.attrs {
+        let struct_attrs = get_field_attributes(&attr);
+        for struct_attr in struct_attrs {
+            match struct_attr.value {
+                syn::Lit::Int(int_lit) => {
+                    if struct_attr.name == "version" {
+                        return int_lit.base10_parse().unwrap();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    0
 }
 
 /// Input must be a string containing a rust source file
@@ -88,16 +104,25 @@ pub fn scan_structs(input: String) -> syn::parse::Result<Vec<StructDescriptor>> 
     let rust_file: syn::File = syn::parse_file(&input)?;
     let mut descriptors = Vec::new();
 
+    // Well, this is gonna be hard to read ...
     for item in rust_file.items {
         match item {
             syn::Item::Struct(struct_item) => {
+                let struct_version = get_struct_version(&struct_item);
+                if struct_version == 0 {
+                    // Ignore unversioned structs.
+                    continue;
+                }
+
                 let mut descriptor = StructDescriptor {
-                    version: 0,
+                    version: get_struct_version(&struct_item),
                     ty: struct_item.ident.to_string(),
                     fields: vec![],
                     field_types: vec![],
                     field_attrs: vec![],
                 };
+               
+
                 match struct_item.fields {
                     syn::Fields::Named(ref named_fields) => {
                         let pairs = named_fields.named.pairs();
@@ -116,24 +141,7 @@ pub fn scan_structs(input: String) -> syn::parse::Result<Vec<StructDescriptor>> 
                                 }
                                 _ => {}
                             }
-                            // Obtain struct attrs.
-                            for attr in &struct_item.attrs {
-                                let struct_attrs = get_field_attributes(&attr);
-                                if struct_attrs.len() > 0 {
-                                    for struct_attr in struct_attrs {
-                                        match struct_attr.value {
-                                            syn::Lit::Int(int_lit) => {
-                                                if struct_attr.name == "version" {
-                                                    descriptor.version = int_lit.base10_parse().unwrap();
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                        
-                                    }
-                                    break;
-                                }
-                            }
+                         
                             // Obtain field snapshot attributes.
                             let mut field_attrs = Vec::new();
 
@@ -158,58 +166,115 @@ pub fn scan_structs(input: String) -> syn::parse::Result<Vec<StructDescriptor>> 
     Ok(descriptors)
 }
 
-fn generate_snapshot_impl(
+// Generate translations from source descriptor to multiple target descriptors.
+fn generate_snapshot_fn(
+    parent_indent: &String,
+    source: &StructDescriptor,
+    targets: &Vec<StructDescriptor>,
+    output: &mut dyn Write,
+) -> std::io::Result<()> {
+    output.write_fmt(format_args!(
+        "{}fn snapshot(&self, id: String, version: u16, snapshot: &mut Snapshot) {{\n",
+        parent_indent
+    ))?;
+
+    let mut indent = String::from(parent_indent) + "    ";
+    let fields = &source.fields;
+    let version = source.version;
+    let field_types = &source.field_types;
+    let field_attrs = &source.field_attrs;
+
+    // Start matching version here.
+    output.write_fmt(format_args!("{}match version {{\n", indent))?;
+    indent = indent + "    ";
+
+    // Same version
+    output.write_fmt(format_args!("{}{} => {{\n", indent, source.version))?;
+    indent = indent + "    ";
+    
+    for i in 0..fields.len() {
+        output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
+        output.write_fmt(format_args!("{}snapshot.set_object(SnapshotPropKind::CONFIG, id.clone() + \"{}\", {}, &self.{});\n", indent, fields[i], version, fields[i]))?;
+    }
+
+    indent = indent[4..].to_string();
+    output.write_fmt(format_args!("{}}}\n", indent))?;
+    // End same version
+
+    for target in targets {
+        let common_fields = fields.intersect(target.fields.clone());
+
+        // Target version common fields start 
+        output.write_fmt(format_args!("{}{} => {{\n", indent, target.version))?;
+        indent = indent + "    ";
+        
+        // Handle common fields
+        for i in 0..common_fields.len() {
+            output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
+            output.write_fmt(format_args!("{}snapshot.set_object(SnapshotPropKind::CONFIG, id.clone() + \"{}\", {}, &self.{});\n", indent, fields[i], target.version, fields[i]))?;
+        }
+        indent = indent[4..].to_string();
+        output.write_fmt(format_args!("{}}}\n", indent))?;
+    }
+
+    indent = indent[4..].to_string();
+    output.write_fmt(format_args!("{}}}\n", indent))?;
+    indent = indent[4..].to_string();
+    output.write_fmt(format_args!("{}}}\n", indent))?;
+    Ok(())
+}
+
+fn generate_restore_fn(
+    parent_indent: &String,
     struct_descriptor: &StructDescriptor,
     output: &mut dyn Write,
 ) -> std::io::Result<()> {
-    let mut indent = "".to_owned();
-
     output.write_fmt(format_args!(
-        "{}// Struct descriptor {:?}\n",
-        indent, &struct_descriptor
+        "{}fn restore(id: String, snapshot: &mut Snapshot) -> Self {{\n",
+        parent_indent
     ))?;
 
-    output.write_fmt(format_args!(
-        "{}impl Snapshotable for {} {{\n",
-        indent, struct_descriptor.ty
-    ))?;
-    indent += "    ";
-
-    // Snapshot
-    output.write_fmt(format_args!(
-        "{}fn snapshot(&self, id: String, engine: &mut Snapshot) {{\n",
-        indent
-    ))?;
-    indent += "    ";
+    let mut indent = String::from(parent_indent) + "    ";
+    output.write_fmt(format_args!("{} {} {{\n", indent, struct_descriptor.ty))?;
+    indent = indent + &String::from("    ");
     let fields = &struct_descriptor.fields;
     let field_types = &struct_descriptor.field_types;
     let field_attrs = &struct_descriptor.field_attrs;
 
     for i in 0..fields.len() {
-        output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
-        output.write_fmt(format_args!("{}engine.set_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + \"{}\", 0, &self.{});\n", indent, fields[i], fields[i]))?;
+        output.write_fmt(format_args!("{}{}: snapshot.get_object(SnapshotPropKind::CONFIG, id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
     }
 
     indent = indent[4..].to_string();
-    output.write_fmt(format_args!("{}}}\n", indent));
+    output.write_fmt(format_args!("{}}}\n", indent))?;
+    indent = indent[4..].to_string();
+    output.write_fmt(format_args!("{}}}\n", indent))?;
+    Ok(())
+}
 
-    // Restore
+
+fn generate_snapshot_impl(
+    source: &StructDescriptor,
+    targets: &Vec<StructDescriptor>,
+    output: &mut dyn Write,
+) -> std::io::Result<()> {
+    let mut indent = String::new();
+
     output.write_fmt(format_args!(
-        "{}fn restore(id: String, engine: &mut Snapshot) -> Self {{\n",
-        indent
+        "{}// Struct descriptor {:?}\n",
+        indent, &source
     ))?;
-    indent += "    ";
-    output.write_fmt(format_args!("{} {} {{\n", indent, struct_descriptor.ty))?;
-    indent += "    ";
 
-    for i in 0..fields.len() {
-        output.write_fmt(format_args!("{}{}: engine.get_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
-    }
+    output.write_fmt(format_args!(
+        "{}impl Snapshotable for {} {{\n",
+        indent, source.ty
+    ))?;
+    indent = indent + &String::from("    ");
+    
+    //let targets = struct_de
+    generate_snapshot_fn(&indent, source, targets, output)?;
+    generate_restore_fn(&indent, source, output)?;
 
-    indent = indent[4..].to_string();
-    output.write_fmt(format_args!("{}}}\n", indent));
-    indent = indent[4..].to_string();
-    output.write_fmt(format_args!("{}}}\n", indent));
     indent = indent[4..].to_string();
     output.write_fmt(format_args!("{}}}\n", indent));
 
@@ -242,7 +307,7 @@ fn main() {
     };
 
     let path = Path::new("./src/structs.rs");
-    let struct_descriptors = scan_file(&path);
+    let mut struct_descriptors = scan_file(&path);
     file.write_fmt(format_args!(
         "// Code autogenerated by the Snapshot crate\n"
     ))
@@ -253,7 +318,9 @@ fn main() {
     ))
     .unwrap();
 
-    for descriptor in struct_descriptors {
-        generate_snapshot_impl(&descriptor, &mut file).unwrap();
-    }
+    // Sort by version in reverse
+    struct_descriptors.sort_by(|a, b| b.version.cmp(&a.version));
+    // Translate from latest to all other
+    let source = struct_descriptors.remove(0);
+    generate_snapshot_impl(&source, &struct_descriptors, &mut file).unwrap();
 }

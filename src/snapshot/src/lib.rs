@@ -36,7 +36,7 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 /// to the serialized struct location and size within the DataBlob.
 ///
 /// The snapshot engine works as a data store, properties are created/read
-/// using get/set_snapshot_property.
+/// using get/set_object.
 ///
 /// Loading a snapshot does not trigger any version translation, it simply
 /// loads all the metadata and uses it to create u8 slices for each property.
@@ -90,8 +90,8 @@ pub struct Snapshot {
 /// This trait is automatically implemented on user specified structs
 /// or otherwise manually implemented.
 pub trait Snapshotable {
-    fn snapshot(&self, id: String, engine: &mut Snapshot);
-    fn restore(id: String, engine: &mut Snapshot) -> Self;
+    fn snapshot(&self, id: String, version: u16, snapshot: &mut Snapshot);
+    fn restore(id: String, snapshot: &mut Snapshot) -> Self;
 }
 
 impl Snapshot {
@@ -142,7 +142,7 @@ impl Snapshot {
         let mut deserializer = Deserializer::from_slice(&file_slice);
 
         // Load the snapshot header.
-        let hdr: SnapshotHdr = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
+        let _hdr: SnapshotHdr = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
         let metadata: SnapshotMetadata =
             serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
 
@@ -164,15 +164,15 @@ impl Snapshot {
     }
 
     /// Store an object with specified id and type.
-    pub fn store_object<S>(&mut self, id: String, object: &S)
+    pub fn store_object<S>(&mut self, id: String, version: u16, object: &S)
     where
         S: Snapshotable + 'static,
     {
-        object.snapshot(id, self);
+        object.snapshot(id, version, self);
     }
 
     /// Low level fn to set a snapshot property. 
-    pub fn set_snapshot_property<T: serde::ser::Serialize + 'static>(
+    pub fn set_object<T: serde::ser::Serialize + 'static>(
         &mut self,
         kind: SnapshotPropKind,
         id: String,
@@ -183,7 +183,7 @@ impl Snapshot {
     }
 
     /// Low level fn to get a snapshot property. 
-    pub fn get_snapshot_property<T: serde::de::DeserializeOwned + 'static>(
+    pub fn get_object<T: serde::de::DeserializeOwned + 'static>(
         &mut self,
         kind: SnapshotPropKind,
         id: String,
@@ -260,7 +260,7 @@ mod tests {
             field2: "Andrei".to_owned(),
             field3: Vec::new(),
         };
-        snapshot.store_object("test_object".to_owned(), &p);
+        snapshot.store_object("test_object".to_owned(), 1, &p);
         snapshot.save(1, "Testing".to_owned()).unwrap();
 
         snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();

@@ -1,3 +1,5 @@
+// !#[allow(non_camel_case_types)]
+
 use std::cmp::PartialEq;
 use snapshot_derive::Snapshot;
 
@@ -13,12 +15,14 @@ struct Test_v1 {
 }
 
 #[derive(Snapshot, Debug, PartialEq)]
+#[snapshot(version = 2)]
 struct Test_v2 {
     field1: u32,
     field2: String,
 }
 
 #[derive(Snapshot, Debug, PartialEq)]
+#[snapshot(version = 3)]
 struct Test_v3 {
     field1: u32,
     field2: String,
