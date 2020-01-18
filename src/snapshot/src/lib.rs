@@ -3,8 +3,7 @@
 extern crate serde;
 extern crate serde_cbor;
 extern crate serde_derive;
-
-pub mod adapter;
+extern crate snapshot_derive;
 
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
@@ -26,22 +25,22 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 ///  |----------------------------|
 ///  |          DataBlob          |
 ///  |----------------------------|
-/// 
-/// 
+///
+///
 /// The header contains snapshot format version, firecracker version
 /// and a description string.
 /// The metadata stores a vector of SnapshotProp entries which describe
-/// the data contained in the datablob. Each property id is unique in its 
-/// SnapshotPropKind space. The version field indicates the property struct 
+/// the data contained in the datablob. Each property id is unique in its
+/// SnapshotPropKind space. The version field indicates the property struct
 /// version to be used when deserializing it. The offset and len fields refer
 /// to the serialized struct location and size within the DataBlob.
-/// 
+///
 /// The snapshot engine works as a data store, properties are created/read
-/// using get/set_snapshot_property or using the SnapshotAdapter trait.
-/// 
+/// using get/set_snapshot_property.
+///
 /// Loading a snapshot does not trigger any version translation, it simply
 /// loads all the metadata and uses it to create u8 slices for each property.
-/// 
+///
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SnapshotPropKind {
@@ -86,23 +85,17 @@ pub struct Snapshot {
     data_blob: SnapshotBlob,
 }
 
-/// Trait that provides an implementation to deconstruct structs
+/// Trait that provides an implementation to deconstruct/restore structs
 /// into typed fields backed by the Snapshot storage.
 /// This trait is automatically implemented on user specified structs
-/// or can otherwise be implemented manually. 
-pub trait Deconstruct {
-    fn deconstruct(&self, id: String, engine: &mut Snapshot);
-}
-
-// Trait that provides an implementation to reconstruct structs
-// from typed fields backed by the Snapshot storage.
-// This trait is automatically implemented on user specified structs
-// or can otherwise be implemented manually. 
-pub trait Reconstruct {
-    fn reconstruct(id: String, engine: &mut Snapshot) -> Self;
+/// or otherwise manually implemented.
+pub trait Snapshotable {
+    fn snapshot(&self, id: String, engine: &mut Snapshot);
+    fn restore(id: String, engine: &mut Snapshot) -> Self;
 }
 
 impl Snapshot {
+    //// Public API 
     pub fn new(path: &Path) -> std::io::Result<Snapshot> {
         let file = OpenOptions::new().create(true).write(true).open(path)?;
 
@@ -111,66 +104,6 @@ impl Snapshot {
             file,
             data_blob: Vec::new(),
         })
-    }
-
-    pub fn restore<D>(&mut self, id: String) -> D
-    where
-        D: Reconstruct + 'static 
-    {
-        D::reconstruct(id, self)
-    }
-
-    pub fn store<S>(&mut self, id: String, object: S)
-    where
-        S: Deconstruct + 'static 
-    {
-        object.deconstruct(id, self);
-    }
-
-    // Save the state of an object using a SnapshotAdapter interface.
-    pub fn save_state<S, D>(&mut self, object: &adapter::SnapshotAdapter<S, D>)
-    where
-        S: serde::ser::Serialize + 'static,
-        D: serde::de::DeserializeOwned + 'static,
-    {
-        let state = object.save_state();
-        self.set_snapshot_property(state.kind, state.id, state.version, state.data);
-    }
-
-    pub fn set_snapshot_property<T: serde::ser::Serialize + 'static>(
-        &mut self,
-        kind: SnapshotPropKind,
-        id: String,
-        version: u16,
-        data: T,
-    ) {
-        self.set_raw_property(kind, id, version, serde_cbor::to_vec(&data).unwrap())
-    }
-
-    pub fn get_snapshot_property<T: serde::de::DeserializeOwned + 'static>(
-        &mut self,
-        kind: SnapshotPropKind,
-        id: String,
-    ) -> Option<T> {
-        self.get_raw_property(kind, id).map(|blob| {
-            let mut deserializer = Deserializer::from_slice(blob.as_slice());
-            let prop: T = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-            prop
-        })
-    }
-
-    pub(crate) fn get_raw_property(&self, kind: SnapshotPropKind, id: String) -> Option<&Vec<u8>> {
-        self.props.get(&(kind, id)).map(|(_, blob)| blob)
-    }
-
-    pub(crate) fn set_raw_property(
-        &mut self,
-        kind: SnapshotPropKind,
-        id: String,
-        version: u16,
-        blob: SnapshotBlob,
-    ) {
-        self.props.insert((kind, id), (version, blob));
     }
 
     pub fn save(&mut self, app_version: u16, description: String) -> std::io::Result<()> {
@@ -222,6 +155,61 @@ impl Snapshot {
         Ok(snapshot_engine)
     }
 
+    /// Restore an object with specified id and type.
+    pub fn restore_object<D>(&mut self, id: String) -> D
+    where
+        D: Snapshotable + 'static,
+    {
+        D::restore(id, self)
+    }
+
+    /// Store an object with specified id and type.
+    pub fn store_object<S>(&mut self, id: String, object: &S)
+    where
+        S: Snapshotable + 'static,
+    {
+        object.snapshot(id, self);
+    }
+
+    /// Low level fn to set a snapshot property. 
+    pub fn set_snapshot_property<T: serde::ser::Serialize + 'static>(
+        &mut self,
+        kind: SnapshotPropKind,
+        id: String,
+        version: u16,
+        data: &T,
+    ) {
+        self.set_raw_property(kind, id, version, serde_cbor::to_vec(data).unwrap())
+    }
+
+    /// Low level fn to get a snapshot property. 
+    pub fn get_snapshot_property<T: serde::de::DeserializeOwned + 'static>(
+        &mut self,
+        kind: SnapshotPropKind,
+        id: String,
+    ) -> Option<T> {
+        self.get_raw_property(kind, id).map(|blob| {
+            let mut deserializer = Deserializer::from_slice(blob.as_slice());
+            let prop: T = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
+            prop
+        })
+    }
+
+    //// Internal APIs
+    pub(crate) fn get_raw_property(&self, kind: SnapshotPropKind, id: String) -> Option<&Vec<u8>> {
+        self.props.get(&(kind, id)).map(|(_, blob)| blob)
+    }
+
+    pub(crate) fn set_raw_property(
+        &mut self,
+        kind: SnapshotPropKind,
+        id: String,
+        version: u16,
+        blob: SnapshotBlob,
+    ) {
+        self.props.insert((kind, id), (version, blob));
+    }
+
     // Returns data blob and metadata
     fn save_metadata(&mut self) -> (Vec<u8>, SnapshotMetadata) {
         let mut metadata = SnapshotMetadata { props: Vec::new() };
@@ -257,119 +245,26 @@ impl Snapshot {
     }
 }
 
-#[derive(Serialize, Debug, Deserialize, Clone)]
-pub struct Person {
-    age: u8,
-    name: String,
-    // Field added in latest version(2)
-    rank: u8
-}
+
 
 mod tests {
     use super::*;
-
-    struct Dummy {}
-
+    include!("structs.rs");
     include!("/tmp/translator.rs");
-
-    #[derive(Serialize, Debug, Deserialize, Clone)]
-    struct Person_v1 {
-        age: u8,
-        name: String,
-    }
-    
-    #[derive(Serialize, Debug, Deserialize, Clone)]
-    struct Person_v3 {
-        age: u8,
-        name: String,
-        rank: u8,
-        child: Person,
-    }
-
-    impl adapter::SnapshotAdapter<Person, Person> for Dummy {
-        fn load_state(&mut self, state: Person) {
-            
-        }
-
-        fn save_state(&self) -> adapter::State<Person> {
-            let person = Person {
-                age: 133,
-                name: "Santa".to_owned(),
-                rank: 1
-            };
-
-            adapter::State {
-                id: "DummyPerson".to_owned(),
-                kind: SnapshotPropKind::DEVICE,
-                version: 1,
-                data: person
-            }
-        }
-    }
-
-    impl Deconstruct for Person {
-        fn deconstruct(&self, id: String, engine: &mut Snapshot) {
-            engine.set_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".age", 0, self.age);
-            engine.set_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".name", 0, self.name.clone());
-            engine.set_snapshot_property(SnapshotPropKind::CONFIG, id + ".rank", 0, self.rank);
-        }
-    }
-
-    impl Reconstruct for Person {
-        fn reconstruct(id: String, engine: &mut Snapshot) -> Self {
-            Person {
-                age: engine.get_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".age").unwrap_or_default(),
-                name: engine.get_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".name").unwrap_or_default(),
-                rank: engine.get_snapshot_property(SnapshotPropKind::CONFIG, id + ".rank").unwrap_or_default(),
-            }
-        }
-    }
 
     #[test]
     fn test_save() {
-        let mut engine = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
-        let p = Person {
-            age: 10,
-            name: "Andrei".to_owned(),
-            rank: 13,
+        let mut snapshot = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
+        let p = Test_v1 {
+            field1: 10,
+            field2: "Andrei".to_owned(),
+            field3: Vec::new(),
         };
+        snapshot.store_object("test_object".to_owned(), &p);
+        snapshot.save(1, "Testing".to_owned()).unwrap();
 
-
-        // let person = Person_v1 {
-        //     age: 35,
-        //     name: "Andrei".to_owned(),
-        // };
-
-        // let person2 = Person_v1 {
-        //     age: 33,
-        //     name: "Georgiana".to_owned(),
-        // };
-
-        // engine.set_snapshot_property(
-        //     SnapshotPropKind::CONFIG,
-        //     "author".to_owned(),
-        //     1,
-        //     person,
-        // );
-        // engine.set_snapshot_property(
-        //     SnapshotPropKind::CONFIG,
-        //     "wife".to_owned(),
-        //     1,
-        //     person2,
-        // );
-
-
-        // engine.save_state(&Dummy {});
-        
-        
-        engine.store("Person_1".to_owned(), p);
-        engine.save(1,"Testing".to_owned()).unwrap();
-        engine = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
-
-        let x: Person = engine.restore("Person_1".to_owned());
-
-        println!("{:?}", x);
-
-        assert!(false);
+        snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
+        let x: Test_v1 = snapshot.restore_object("test_object".to_owned());
+        assert_eq!(p, x);
     }
 }
