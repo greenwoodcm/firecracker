@@ -1,4 +1,4 @@
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 extern crate serde;
 extern crate serde_cbor;
@@ -51,10 +51,6 @@ pub enum SnapshotPropKind {
 
 type SnapshotBlob = Vec<u8>;
 
-pub trait StructDescriptor {
-    fn version() -> u16;
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 /// Describes a snapshot property.
 pub struct SnapshotProp {
@@ -84,21 +80,51 @@ struct SnapshotMetadata {
     props: Vec<SnapshotProp>,
 }
 
-pub struct SnapshotEngine {
+pub struct Snapshot {
     props: HashMap<(SnapshotPropKind, String), (u16, SnapshotBlob)>,
     file: File,
     data_blob: SnapshotBlob,
 }
 
-impl SnapshotEngine {
-    pub fn new(path: &Path) -> std::io::Result<SnapshotEngine> {
+/// Trait that provides an implementation to deconstruct structs
+/// into typed fields backed by the Snapshot storage.
+/// This trait is automatically implemented on user specified structs
+/// or can otherwise be implemented manually. 
+pub trait Deconstruct {
+    fn deconstruct(&self, id: String, engine: &mut Snapshot);
+}
+
+// Trait that provides an implementation to reconstruct structs
+// from typed fields backed by the Snapshot storage.
+// This trait is automatically implemented on user specified structs
+// or can otherwise be implemented manually. 
+pub trait Reconstruct {
+    fn reconstruct(id: String, engine: &mut Snapshot) -> Self;
+}
+
+impl Snapshot {
+    pub fn new(path: &Path) -> std::io::Result<Snapshot> {
         let file = OpenOptions::new().create(true).write(true).open(path)?;
 
-        Ok(SnapshotEngine {
+        Ok(Snapshot {
             props: HashMap::new(),
             file,
             data_blob: Vec::new(),
         })
+    }
+
+    pub fn restore<D>(&mut self, id: String) -> D
+    where
+        D: Reconstruct + 'static 
+    {
+        D::reconstruct(id, self)
+    }
+
+    pub fn store<S>(&mut self, id: String, object: S)
+    where
+        S: Deconstruct + 'static 
+    {
+        object.deconstruct(id, self);
     }
 
     // Save the state of an object using a SnapshotAdapter interface.
@@ -169,12 +195,12 @@ impl SnapshotEngine {
         Ok(())
     }
 
-    pub fn load(path: &Path) -> std::io::Result<SnapshotEngine> {
+    pub fn load(path: &Path) -> std::io::Result<Snapshot> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut file_slice = Vec::new();
         file.read_to_end(&mut file_slice)?;
 
-        let mut snapshot_engine = SnapshotEngine {
+        let mut snapshot_engine = Snapshot {
             props: HashMap::new(),
             file,
             data_blob: Vec::new(),
@@ -231,31 +257,33 @@ impl SnapshotEngine {
     }
 }
 
+#[derive(Serialize, Debug, Deserialize, Clone)]
+pub struct Person {
+    age: u8,
+    name: String,
+    // Field added in latest version(2)
+    rank: u8
+}
+
 mod tests {
     use super::*;
 
     struct Dummy {}
 
-    #[derive(Debug, Serialize, Deserialize, Clone)]
+    include!("/tmp/translator.rs");
+
+    #[derive(Serialize, Debug, Deserialize, Clone)]
     struct Person_v1 {
         age: u8,
         name: String,
     }
-
-    impl StructDescriptor for Person_v1 {
-        fn version() -> u16 { 1 }
-    }
-
-    #[derive(Debug, Serialize, Deserialize, Clone)]
-    struct Person {
+    
+    #[derive(Serialize, Debug, Deserialize, Clone)]
+    struct Person_v3 {
         age: u8,
         name: String,
-        // Field added in latest version(2)
-        rank: u8
-    }
-
-    impl StructDescriptor for Person {
-        fn version() -> u16 { 2 }
+        rank: u8,
+        child: Person,
     }
 
     impl adapter::SnapshotAdapter<Person, Person> for Dummy {
@@ -273,53 +301,74 @@ mod tests {
             adapter::State {
                 id: "DummyPerson".to_owned(),
                 kind: SnapshotPropKind::DEVICE,
-                version: Person::version(),
+                version: 1,
                 data: person
+            }
+        }
+    }
+
+    impl Deconstruct for Person {
+        fn deconstruct(&self, id: String, engine: &mut Snapshot) {
+            engine.set_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".age", 0, self.age);
+            engine.set_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".name", 0, self.name.clone());
+            engine.set_snapshot_property(SnapshotPropKind::CONFIG, id + ".rank", 0, self.rank);
+        }
+    }
+
+    impl Reconstruct for Person {
+        fn reconstruct(id: String, engine: &mut Snapshot) -> Self {
+            Person {
+                age: engine.get_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".age").unwrap_or_default(),
+                name: engine.get_snapshot_property(SnapshotPropKind::CONFIG, id.clone() + ".name").unwrap_or_default(),
+                rank: engine.get_snapshot_property(SnapshotPropKind::CONFIG, id + ".rank").unwrap_or_default(),
             }
         }
     }
 
     #[test]
     fn test_save() {
-        let mut engine = SnapshotEngine::new(Path::new("/tmp/snap.fcs")).unwrap();
-
-        let person = Person_v1 {
-            age: 35,
+        let mut engine = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
+        let p = Person {
+            age: 10,
             name: "Andrei".to_owned(),
-        };
-        let person2 = Person_v1 {
-            age: 33,
-            name: "Georgiana".to_owned(),
+            rank: 13,
         };
 
-        engine.set_snapshot_property(
-            SnapshotPropKind::CONFIG,
-            "author".to_owned(),
-            1,
-            person,
-        );
-        engine.set_snapshot_property(
-            SnapshotPropKind::CONFIG,
-            "wife".to_owned(),
-            1,
-            person2,
-        );
 
-        engine.save_state(&Dummy {});
+        // let person = Person_v1 {
+        //     age: 35,
+        //     name: "Andrei".to_owned(),
+        // };
 
-        engine.save(1, "Testing".to_owned()).unwrap();
-        engine = SnapshotEngine::load(Path::new("/tmp/snap.fcs")).unwrap();
+        // let person2 = Person_v1 {
+        //     age: 33,
+        //     name: "Georgiana".to_owned(),
+        // };
 
-        let p1: Person_v1 =
-        engine.get_snapshot_property(SnapshotPropKind::CONFIG, "author".to_owned())
-                .unwrap();
+        // engine.set_snapshot_property(
+        //     SnapshotPropKind::CONFIG,
+        //     "author".to_owned(),
+        //     1,
+        //     person,
+        // );
+        // engine.set_snapshot_property(
+        //     SnapshotPropKind::CONFIG,
+        //     "wife".to_owned(),
+        //     1,
+        //     person2,
+        // );
+
+
+        // engine.save_state(&Dummy {});
         
-        let p2: Person =
-            engine.get_snapshot_property(SnapshotPropKind::DEVICE, "DummyPerson".to_owned())
-                .unwrap();
+        
+        engine.store("Person_1".to_owned(), p);
+        engine.save(1,"Testing".to_owned()).unwrap();
+        engine = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
 
-        println!("{:?}", p1);
-        println!("{:?}", p2);
+        let x: Person = engine.restore("Person_1".to_owned());
+
+        println!("{:?}", x);
 
         assert!(false);
     }
