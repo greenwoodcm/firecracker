@@ -21,7 +21,7 @@ use std::io::prelude::*;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use array_tool::vec::Intersect;
+use array_tool::vec::{Intersect, Uniq};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 struct SnapshotFieldAttr {
@@ -38,6 +38,15 @@ pub struct StructDescriptor {
     fields: Vec<String>,
     field_types: Vec<String>,
     field_attrs: Vec<Vec<SnapshotFieldAttr>>,
+}
+
+// Returns true if field is snapshotable and the struct version.
+fn field_is_snapshotable(descriptors: &Vec<StructDescriptor>, ty: &str) -> (bool, u16) {
+    if let Some(desc) = descriptors.iter().find(|&x| x.ty == ty) {
+        (true, desc.version)
+    } else {
+        (false, 0)
+    }
 }
 
 // Returns the snapshot attribute name
@@ -194,7 +203,13 @@ fn generate_snapshot_fn(
     
     for i in 0..fields.len() {
         output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
-        output.write_fmt(format_args!("{}snapshot.set_object(SnapshotPropKind::CONFIG, id.clone() + \"{}\", {}, &self.{});\n", indent, fields[i], version, fields[i]))?;
+        let (field_snapshotable, struct_version) = field_is_snapshotable(&targets, field_types[i].as_str());
+        if field_snapshotable {
+            // This struct implements Snapshot, use that interface to serialize.
+            output.write_fmt(format_args!("{}self.{}.snapshot(id.clone() + \".{}\", {}, snapshot);\n", indent, fields[i], fields[i], struct_version))?;
+        } else {
+            output.write_fmt(format_args!("{}snapshot.set_object(SnapshotObjectType::Field, id.clone() + \"{}\", {}, &self.{});\n", indent, fields[i], version, fields[i]))?;
+        }
     }
 
     indent = indent[4..].to_string();
@@ -210,13 +225,26 @@ fn generate_snapshot_fn(
         
         // Handle common fields
         for i in 0..common_fields.len() {
-            output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
-            output.write_fmt(format_args!("{}snapshot.set_object(SnapshotPropKind::CONFIG, id.clone() + \"{}\", {}, &self.{});\n", indent, fields[i], target.version, fields[i]))?;
+            // Find the index of the common field name and use that index to find its attr type
+            let common_field_index = fields.iter().position(|x| x == &common_fields[i]).unwrap();
+            let (field_snapshotable, struct_version) = field_is_snapshotable(&targets, field_types[common_field_index].as_str());
+
+            if field_snapshotable {
+                // This struct implements Snapshot, use that interface to serialize.
+                output.write_fmt(format_args!("{}self.{}.snapshot(id.clone() + \".{}\", {}, snapshot);\n", indent, common_fields[i], common_fields[i], struct_version))?;
+            } else {
+                output.write_fmt(format_args!("{}snapshot.set_object(SnapshotObjectType::Field, id.clone() + \"{}\", {}, &self.{});\n", indent, common_fields[i], target.version, common_fields[i]))?;
+            }
         }
+
+        // Source/Target unique fields are not saved. Restore will handle their default values 
+        // if needed.
         indent = indent[4..].to_string();
         output.write_fmt(format_args!("{}}}\n", indent))?;
     }
 
+    // Same version
+    output.write_fmt(format_args!("{}_ => {{ panic!(\"Attempted to translate to unknown version: {{}}\", version)}}\n", indent))?;
     indent = indent[4..].to_string();
     output.write_fmt(format_args!("{}}}\n", indent))?;
     indent = indent[4..].to_string();
@@ -227,6 +255,7 @@ fn generate_snapshot_fn(
 fn generate_restore_fn(
     parent_indent: &String,
     struct_descriptor: &StructDescriptor,
+    targets: &Vec<StructDescriptor>,
     output: &mut dyn Write,
 ) -> std::io::Result<()> {
     output.write_fmt(format_args!(
@@ -242,7 +271,49 @@ fn generate_restore_fn(
     let field_attrs = &struct_descriptor.field_attrs;
 
     for i in 0..fields.len() {
-        output.write_fmt(format_args!("{}{}: snapshot.get_object(SnapshotPropKind::CONFIG, id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
+        // Check if field implements the Snapshot trait
+        let (field_snapshotable, _) = field_is_snapshotable(&targets, field_types[i].as_str());
+
+        if field_snapshotable {
+            // This struct implements Snapshot, use that interface to serialize.
+            output.write_fmt(format_args!("{}{}: {}::restore(id.clone() + \".{}\", snapshot),\n", indent, fields[i], field_types[i], fields[i]))?;
+            continue;
+        }
+
+        // Get default field value
+        if let Some(default_attribute) = field_attrs[i].iter().find(|&x| x.name == "default") {
+            output.write_fmt(format_args!("{}// snapshot default attr = {:?}\n", indent, default_attribute));
+            match &default_attribute.value {
+                syn::Lit::Str(lit_str) => {
+                    output.write_fmt(format_args!(
+                        "{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or(\"{}\".to_owned()),\n",
+                        indent, fields[i], fields[i], lit_str.value()
+                    ))?;
+                }
+                syn::Lit::Int(lit_int) => {
+                    let literal: u64 = lit_int.base10_parse().unwrap();
+                    output.write_fmt(format_args!(
+                        "{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or({}),\n",
+                        indent, fields[i], fields[i], literal
+                    ))?;
+                }
+                syn::Lit::Bool(lit_bool) => {
+                    output.write_fmt(format_args!(
+                        "{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or({}),\n",
+                        indent, fields[i], fields[i], lit_bool.value
+                    ))?;
+                }
+                // syn::Lit::Byte(LitByte),
+                // syn::Lit::Char(LitChar),
+                // syn::Lit::Float(LitFloat),
+                _ => {
+                    panic!("Unsupported default value literal");
+                } 
+            }
+        } else {
+            // Use Default trait.
+            output.write_fmt(format_args!("{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
+        }
     }
 
     indent = indent[4..].to_string();
@@ -261,7 +332,7 @@ fn generate_snapshot_impl(
     let mut indent = String::new();
 
     output.write_fmt(format_args!(
-        "{}// Struct descriptor {:?}\n",
+        "{}// {:?}\n",
         indent, &source
     ))?;
 
@@ -271,9 +342,11 @@ fn generate_snapshot_impl(
     ))?;
     indent = indent + &String::from("    ");
     
-    //let targets = struct_de
     generate_snapshot_fn(&indent, source, targets, output)?;
-    generate_restore_fn(&indent, source, output)?;
+    // We do not need the other struct descriptors to perform restore,
+    // as the structure is assembled from what is available in the object store
+    // We need it to be able to find if a field type is Snapshotable.
+    generate_restore_fn(&indent, source, targets, output)?;
 
     indent = indent[4..].to_string();
     output.write_fmt(format_args!("{}}}\n", indent));
@@ -309,7 +382,7 @@ fn main() {
     let path = Path::new("./src/structs.rs");
     let mut struct_descriptors = scan_file(&path);
     file.write_fmt(format_args!(
-        "// Code autogenerated by the Snapshot crate\n"
+        "// File fenerated by Snapshot {}\n// DO NOT EDIT!\n", env!("CARGO_PKG_VERSION")
     ))
     .unwrap();
     file.write_fmt(format_args!(
@@ -323,4 +396,10 @@ fn main() {
     // Translate from latest to all other
     let source = struct_descriptors.remove(0);
     generate_snapshot_impl(&source, &struct_descriptors, &mut file).unwrap();
+
+    // Debug only: generate snapshot impl for all structs 
+    while struct_descriptors.len() > 0 {
+        generate_snapshot_impl(&struct_descriptors.remove(0), &struct_descriptors, &mut file).unwrap();
+    }
+
 }

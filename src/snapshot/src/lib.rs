@@ -29,9 +29,9 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 ///
 /// The header contains snapshot format version, firecracker version
 /// and a description string.
-/// The metadata stores a vector of SnapshotProp entries which describe
+/// The metadata stores a vector of SnapshotObject entries which describe
 /// the data contained in the datablob. Each property id is unique in its
-/// SnapshotPropKind space. The version field indicates the property struct
+/// SnapshotObjectType space. The version field indicates the property struct
 /// version to be used when deserializing it. The offset and len fields refer
 /// to the serialized struct location and size within the DataBlob.
 ///
@@ -43,21 +43,22 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 ///
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SnapshotPropKind {
-    CONFIG,
-    DEVICE,
+pub enum SnapshotObjectType {
+    Field,
+    Struct,
+    NestedStruct,
 }
 
 type SnapshotBlob = Vec<u8>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 /// Describes a snapshot property.
-pub struct SnapshotProp {
-    // Struct version
+pub struct SnapshotObject {
+    // Object version
     version: u16,
     // Unique ID.
     id: String,
-    kind: SnapshotPropKind,
+    kind: SnapshotObjectType,
     // Offset inside the SnapshotData blob.
     offset: usize,
     // Length of the blob
@@ -76,11 +77,11 @@ struct SnapshotHdr {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotMetadata {
-    props: Vec<SnapshotProp>,
+    props: Vec<SnapshotObject>,
 }
 
 pub struct Snapshot {
-    props: HashMap<(SnapshotPropKind, String), (u16, SnapshotBlob)>,
+    props: HashMap<(SnapshotObjectType, String), (u16, SnapshotBlob)>,
     file: File,
     data_blob: SnapshotBlob,
 }
@@ -174,7 +175,7 @@ impl Snapshot {
     /// Low level fn to set a snapshot property. 
     pub fn set_object<T: serde::ser::Serialize + 'static>(
         &mut self,
-        kind: SnapshotPropKind,
+        kind: SnapshotObjectType,
         id: String,
         version: u16,
         data: &T,
@@ -185,7 +186,7 @@ impl Snapshot {
     /// Low level fn to get a snapshot property. 
     pub fn get_object<T: serde::de::DeserializeOwned + 'static>(
         &mut self,
-        kind: SnapshotPropKind,
+        kind: SnapshotObjectType,
         id: String,
     ) -> Option<T> {
         self.get_raw_property(kind, id).map(|blob| {
@@ -196,13 +197,13 @@ impl Snapshot {
     }
 
     //// Internal APIs
-    pub(crate) fn get_raw_property(&self, kind: SnapshotPropKind, id: String) -> Option<&Vec<u8>> {
+    pub(crate) fn get_raw_property(&self, kind: SnapshotObjectType, id: String) -> Option<&Vec<u8>> {
         self.props.get(&(kind, id)).map(|(_, blob)| blob)
     }
 
     pub(crate) fn set_raw_property(
         &mut self,
-        kind: SnapshotPropKind,
+        kind: SnapshotObjectType,
         id: String,
         version: u16,
         blob: SnapshotBlob,
@@ -217,7 +218,7 @@ impl Snapshot {
         let mut data_blob = Vec::new();
 
         for ((kind, id), prop_blob) in &self.props {
-            let prop = SnapshotProp {
+            let prop = SnapshotObject {
                 version: prop_blob.0,
                 id: id.to_string(),
                 kind: *kind,
@@ -255,16 +256,26 @@ mod tests {
     #[test]
     fn test_save() {
         let mut snapshot = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
-        let p = Test_v1 {
+        let p = Test_V1 {
             field1: 10,
             field2: "Andrei".to_owned(),
-            field3: Vec::new(),
+            field3: vec![1; 3],
         };
-        snapshot.store_object("test_object".to_owned(), 1, &p);
+
+        println!("Saving struct as {:?}", &p);
+
+        snapshot.store_object("test_object".to_owned(), 2, &p);
         snapshot.save(1, "Testing".to_owned()).unwrap();
 
         snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
-        let x: Test_v1 = snapshot.restore_object("test_object".to_owned());
-        assert_eq!(p, x);
+        let x: Test_V3 = snapshot.restore_object("test_object".to_owned());
+        let y: Test_V2 = snapshot.restore_object("test_object".to_owned());
+        let z: Test_V1 = snapshot.restore_object("test_object".to_owned());
+
+        println!("Restore as {:?}", x);
+        println!("Restore as {:?}", y);
+        println!("Restore as {:?}", z);
+
+        assert!(false);
     }
 }
