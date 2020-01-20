@@ -155,12 +155,9 @@ pub fn scan_structs(input: String) -> syn::parse::Result<Vec<StructDescriptor>> 
                             let mut field_attrs = Vec::new();
 
                             for attr in &field.value().attrs {
-                                let new_field_attrs = get_field_attributes(&attr);
-                                if new_field_attrs.len() > 0 {
-                                    field_attrs.extend(new_field_attrs);
-                                    break;
-                                }
+                                field_attrs.extend(get_field_attributes(&attr));
                             }
+                            
                             descriptor.field_attrs.push(field_attrs);
                         }
                     }
@@ -286,20 +283,20 @@ fn generate_restore_fn(
             match &default_attribute.value {
                 syn::Lit::Str(lit_str) => {
                     output.write_fmt(format_args!(
-                        "{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or(\"{}\".to_owned()),\n",
+                        "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or(\"{}\".to_owned()),\n",
                         indent, fields[i], fields[i], lit_str.value()
                     ))?;
                 }
                 syn::Lit::Int(lit_int) => {
                     let literal: u64 = lit_int.base10_parse().unwrap();
                     output.write_fmt(format_args!(
-                        "{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or({}),\n",
+                        "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or({}),\n",
                         indent, fields[i], fields[i], literal
                     ))?;
                 }
                 syn::Lit::Bool(lit_bool) => {
                     output.write_fmt(format_args!(
-                        "{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or({}),\n",
+                        "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or({}),\n",
                         indent, fields[i], fields[i], lit_bool.value
                     ))?;
                 }
@@ -312,7 +309,7 @@ fn generate_restore_fn(
             }
         } else {
             // Use Default trait.
-            output.write_fmt(format_args!("{}{}: snapshot.get_object(SnapshotObjectType::Field, id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
+            output.write_fmt(format_args!("{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
         }
     }
 

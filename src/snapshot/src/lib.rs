@@ -21,26 +21,20 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 ///  |----------------------------|
 ///  |         SnapshotHdr        |
 ///  |----------------------------|
-///  |       SnapshotMetadata     |
+///  |          Objects           |
 ///  |----------------------------|
-///  |          DataBlob          |
-///  |----------------------------|
-///
 ///
 /// The header contains snapshot format version, firecracker version
 /// and a description string.
-/// The metadata stores a vector of SnapshotObject entries which describe
-/// the data contained in the datablob. Each property id is unique in its
-/// SnapshotObjectType space. The version field indicates the property struct
-/// version to be used when deserializing it. The offset and len fields refer
-/// to the serialized struct location and size within the DataBlob.
+/// The objects ared stored as a vector of SnapshotObject entries which describe
+/// the data. The SnapshotObject structure is followed by the cbor serialized
+/// object.
 ///
 /// The snapshot engine works as a data store, properties are created/read
 /// using get/set_object.
 ///
 /// Loading a snapshot does not trigger any version translation, it simply
-/// loads all the metadata and uses it to create u8 slices for each property.
-///
+/// loads all the objects into memory.
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SnapshotObjectType {
@@ -54,15 +48,13 @@ type SnapshotBlob = Vec<u8>;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 /// Describes a snapshot property.
 pub struct SnapshotObject {
+    kind: SnapshotObjectType,
     // Object version
     version: u16,
     // Unique ID.
     id: String,
-    kind: SnapshotObjectType,
-    // Offset inside the SnapshotData blob.
-    offset: usize,
-    // Length of the blob
-    len: usize,
+    // CBOR encoded data
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,15 +67,9 @@ struct SnapshotHdr {
     description: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct SnapshotMetadata {
-    props: Vec<SnapshotObject>,
-}
-
 pub struct Snapshot {
-    props: HashMap<(SnapshotObjectType, String), (u16, SnapshotBlob)>,
-    file: File,
-    data_blob: SnapshotBlob,
+    objects: HashMap<String, SnapshotObject>,
+    file: Option<File>,
 }
 
 /// Trait that provides an implementation to deconstruct/restore structs
@@ -97,20 +83,22 @@ pub trait Snapshotable {
 
 impl Snapshot {
     //// Public API 
+    pub fn new_in_memory() -> std::io::Result<Snapshot> {
+        Ok(Snapshot {
+            objects: HashMap::new(),
+            file: None,
+        })
+    }
     pub fn new(path: &Path) -> std::io::Result<Snapshot> {
         let file = OpenOptions::new().create(true).write(true).open(path)?;
 
         Ok(Snapshot {
-            props: HashMap::new(),
-            file,
-            data_blob: Vec::new(),
+            objects: HashMap::new(),
+            file: Some(file),
         })
     }
 
-    pub fn save(&mut self, app_version: u16, description: String) -> std::io::Result<()> {
-        self.file.set_len(0)?;
-        self.file.seek(SeekFrom::Start(0))?;
-
+    pub fn save_to_mem(&mut self, app_version: u16, description: String) -> std::io::Result<Vec<u8>> {
         // Serialize the header.
         let hdr = SnapshotHdr {
             version: SNAPSHOT_FORMAT_VERSION,
@@ -119,14 +107,39 @@ impl Snapshot {
         };
 
         let mut snapshot_data = serde_cbor::to_vec(&hdr).unwrap();
-        let (mut blob, metadata) = self.save_metadata();
+        let objects = self.save_objects();
 
-        snapshot_data.append(&mut serde_cbor::to_vec(&metadata).unwrap());
-        snapshot_data.append(&mut blob);
-        self.file.write(&snapshot_data)?;
-        self.file.sync_all()?;
+        snapshot_data.append(&mut  serde_cbor::to_vec(&objects).unwrap());
+        Ok(snapshot_data)
+    }
+
+    pub fn save(&mut self, app_version: u16, description: String) -> std::io::Result<()> {
+        let snapshot_data = self.save_to_mem(app_version, description).unwrap();
+
+        let mut file = self.file.as_ref().unwrap();
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+
+        file.write(&snapshot_data)?;
+        file.sync_all()?;
 
         Ok(())
+    }
+
+    pub fn load_from_mem(mem: &[u8]) -> std::io::Result<Snapshot> {
+        let mut snapshot_engine = Snapshot {
+            objects: HashMap::new(),
+            file: None,
+        };
+
+        let mut deserializer = Deserializer::from_slice(&mem);
+
+        // Load the snapshot header.
+        let _hdr: SnapshotHdr = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
+        let objects: Vec<SnapshotObject> = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
+        snapshot_engine.load_objects(objects);
+        
+        Ok(snapshot_engine)
     }
 
     pub fn load(path: &Path) -> std::io::Result<Snapshot> {
@@ -134,26 +147,7 @@ impl Snapshot {
         let mut file_slice = Vec::new();
         file.read_to_end(&mut file_slice)?;
 
-        let mut snapshot_engine = Snapshot {
-            props: HashMap::new(),
-            file,
-            data_blob: Vec::new(),
-        };
-
-        let mut deserializer = Deserializer::from_slice(&file_slice);
-
-        // Load the snapshot header.
-        let _hdr: SnapshotHdr = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-        let metadata: SnapshotMetadata =
-            serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-
-        // Load the data blob.
-        snapshot_engine.data_blob = file_slice[deserializer.byte_offset()..].to_vec();
-        // We need the blob of data because next we will create blobs for each prop using
-        // the data_blob slice.
-        snapshot_engine.load_metadata(metadata);
-
-        Ok(snapshot_engine)
+        Self::load_from_mem(file_slice.as_slice())
     }
 
     /// Restore an object with specified id and type.
@@ -180,67 +174,61 @@ impl Snapshot {
         version: u16,
         data: &T,
     ) {
-        self.set_raw_property(kind, id, version, serde_cbor::to_vec(data).unwrap())
+        self.set_raw_object(kind, id, version, serde_cbor::to_vec(data).unwrap())
     }
 
     /// Low level fn to get a snapshot property. 
     pub fn get_object<T: serde::de::DeserializeOwned + 'static>(
         &mut self,
-        kind: SnapshotObjectType,
         id: String,
     ) -> Option<T> {
-        self.get_raw_property(kind, id).map(|blob| {
-            let mut deserializer = Deserializer::from_slice(blob.as_slice());
-            let prop: T = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-            prop
+        self.get_raw_object(id).map(|snapshot_object| {
+            let mut deserializer = Deserializer::from_slice(snapshot_object);
+            let object: T = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
+            object
         })
     }
 
     //// Internal APIs
-    pub(crate) fn get_raw_property(&self, kind: SnapshotObjectType, id: String) -> Option<&Vec<u8>> {
-        self.props.get(&(kind, id)).map(|(_, blob)| blob)
+    pub(crate) fn get_raw_object(&self, id: String) -> Option<&Vec<u8>> {
+        if let Some(object) = self.objects.get(&id) {
+            return Some(&object.data)
+        }
+        None
     }
 
-    pub(crate) fn set_raw_property(
+    pub(crate) fn set_raw_object(
         &mut self,
         kind: SnapshotObjectType,
         id: String,
         version: u16,
-        blob: SnapshotBlob,
+        data: SnapshotBlob,
     ) {
-        self.props.insert((kind, id), (version, blob));
+        let object = SnapshotObject {
+            kind,
+            version,
+            id: id.clone(),
+            data
+        };
+        self.objects.insert(id, object);
     }
 
-    // Returns data blob and metadata
-    fn save_metadata(&mut self) -> (Vec<u8>, SnapshotMetadata) {
-        let mut metadata = SnapshotMetadata { props: Vec::new() };
+    // Returns the objects to be saved.
+    fn save_objects(&mut self) -> Vec<&SnapshotObject> {
+        let mut objects = Vec::new();
 
-        let mut data_blob = Vec::new();
-
-        for ((kind, id), prop_blob) in &self.props {
-            let prop = SnapshotObject {
-                version: prop_blob.0,
-                id: id.to_string(),
-                kind: *kind,
-                offset: data_blob.len(),
-                len: prop_blob.1.len(),
-            };
-
-            data_blob.append(&mut prop_blob.1.to_vec());
-            metadata.props.push(prop);
+        for (_, snapshot_object) in &self.objects {
+            objects.push(snapshot_object);
         }
 
-        (data_blob, metadata)
+        objects
     }
 
-    fn load_metadata(&mut self, metadata: SnapshotMetadata) {
-        for prop in metadata.props {
-            self.props.insert(
-                (prop.kind, prop.id),
-                (
-                    prop.version,
-                    self.data_blob[prop.offset..prop.offset + prop.len].to_vec(),
-                ),
+    fn load_objects(&mut self, objects: Vec<SnapshotObject>) {
+        for object in objects {
+            self.objects.insert(
+                object.id.clone(),
+                object
             );
         }
     }
