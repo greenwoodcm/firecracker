@@ -157,7 +157,7 @@ pub fn scan_structs(input: String) -> syn::parse::Result<Vec<StructDescriptor>> 
                             for attr in &field.value().attrs {
                                 field_attrs.extend(get_field_attributes(&attr));
                             }
-                            
+
                             descriptor.field_attrs.push(field_attrs);
                         }
                     }
@@ -199,7 +199,10 @@ fn generate_snapshot_fn(
     indent = indent + "    ";
     
     for i in 0..fields.len() {
-        output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
+        if field_attrs[i].len() > 0 {
+            output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
+        }
+
         let (field_snapshotable, struct_version) = field_is_snapshotable(&targets, field_types[i].as_str());
         if field_snapshotable {
             // This struct implements Snapshot, use that interface to serialize.

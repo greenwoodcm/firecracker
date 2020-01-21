@@ -1,13 +1,12 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 extern crate serde;
-extern crate serde_cbor;
+extern crate bincode;
 extern crate serde_derive;
 extern crate snapshot_derive;
 
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
-use serde_cbor::{from_slice, to_vec, Deserializer};
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -27,7 +26,7 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 /// The header contains snapshot format version, firecracker version
 /// and a description string.
 /// The objects ared stored as a vector of SnapshotObject entries which describe
-/// the data. The SnapshotObject structure is followed by the cbor serialized
+/// the data. The SnapshotObject structure is followed by the bincode serialized
 /// object.
 ///
 /// The snapshot engine works as a data store, properties are created/read
@@ -53,7 +52,7 @@ pub struct SnapshotObject {
     version: u16,
     // Unique ID.
     id: String,
-    // CBOR encoded data
+    // bincode encoded data
     data: Vec<u8>,
 }
 
@@ -106,10 +105,10 @@ impl Snapshot {
             description,
         };
 
-        let mut snapshot_data = serde_cbor::to_vec(&hdr).unwrap();
+        let mut snapshot_data = bincode::serialize(&hdr).unwrap();
         let objects = self.save_objects();
 
-        snapshot_data.append(&mut  serde_cbor::to_vec(&objects).unwrap());
+        snapshot_data.append(&mut  bincode::serialize(&objects).unwrap());
         Ok(snapshot_data)
     }
 
@@ -132,11 +131,13 @@ impl Snapshot {
             file: None,
         };
 
-        let mut deserializer = Deserializer::from_slice(&mem);
+        // let mut deserializer = Deserializer::<serde::Deserializer::Error>::from_slice(&mem);
 
         // Load the snapshot header.
-        let _hdr: SnapshotHdr = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-        let objects: Vec<SnapshotObject> = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
+        let hdr: SnapshotHdr = bincode::deserialize(&mem).unwrap();
+        let hdr_size = bincode::serialized_size(&hdr).unwrap() as usize;
+
+        let objects: Vec<SnapshotObject> = bincode::deserialize(&mem[hdr_size..]).unwrap();
         snapshot_engine.load_objects(objects);
         
         Ok(snapshot_engine)
@@ -174,7 +175,7 @@ impl Snapshot {
         version: u16,
         data: &T,
     ) {
-        self.set_raw_object(kind, id, version, serde_cbor::to_vec(data).unwrap())
+        self.set_raw_object(kind, id, version, bincode::serialize(data).unwrap())
     }
 
     /// Low level fn to get a snapshot property. 
@@ -183,9 +184,7 @@ impl Snapshot {
         id: String,
     ) -> Option<T> {
         self.get_raw_object(id).map(|snapshot_object| {
-            let mut deserializer = Deserializer::from_slice(snapshot_object);
-            let object: T = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-            object
+            bincode::deserialize(&snapshot_object).unwrap()
         })
     }
 
