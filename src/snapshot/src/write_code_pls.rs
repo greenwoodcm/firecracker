@@ -180,7 +180,7 @@ fn generate_snapshot_fn(
     output: &mut dyn Write,
 ) -> std::io::Result<()> {
     output.write_fmt(format_args!(
-        "{}fn snapshot(&self, id: String, version: u16, snapshot: &mut Snapshot) {{\n",
+        "{}fn snapshot(&self, version: u16) -> Vec<u8> {{\n",
         parent_indent
     ))?;
 
@@ -190,6 +190,8 @@ fn generate_snapshot_fn(
     let field_types = &source.field_types;
     let field_attrs = &source.field_attrs;
 
+    output.write_fmt(format_args!("{}let mut result = Vec::new();\n", indent))?;
+
     // Start matching version here.
     output.write_fmt(format_args!("{}match version {{\n", indent))?;
     indent = indent + "    ";
@@ -198,14 +200,15 @@ fn generate_snapshot_fn(
     output.write_fmt(format_args!("{}{} => {{\n", indent, source.version))?;
     indent = indent + "    ";
     
+
     for i in 0..fields.len() {
         output.write_fmt(format_args!("{}// attributes = {:?}\n", indent, field_attrs[i]));
         let (field_snapshotable, struct_version) = field_is_snapshotable(&targets, field_types[i].as_str());
         if field_snapshotable {
             // This struct implements Snapshot, use that interface to serialize.
-            output.write_fmt(format_args!("{}self.{}.snapshot(id.clone() + \".{}\", {}, snapshot);\n", indent, fields[i], fields[i], struct_version))?;
+            output.write_fmt(format_args!("{}result.extend(self.{}.snapshot(version));\n", indent, fields[i]))?;
         } else {
-            output.write_fmt(format_args!("{}snapshot.set_object(SnapshotObjectType::Field, id.clone() + \"{}\", {}, &self.{});\n", indent, fields[i], version, fields[i]))?;
+            output.write_fmt(format_args!("{}result.extend(bincode::serialize(&self.{}).unwrap());\n", indent, fields[i]))?;
         }
     }
 
@@ -213,38 +216,40 @@ fn generate_snapshot_fn(
     output.write_fmt(format_args!("{}}}\n", indent))?;
     // End same version
 
-    for target in targets {
-        let common_fields = fields.intersect(target.fields.clone());
+    // for target in targets {
+    //     let common_fields = fields.intersect(target.fields.clone());
 
-        // Target version common fields start 
-        output.write_fmt(format_args!("{}{} => {{\n", indent, target.version))?;
-        indent = indent + "    ";
+    //     // Target version common fields start 
+    //     output.write_fmt(format_args!("{}{} => {{\n", indent, target.version))?;
+    //     indent = indent + "    ";
         
-        // Handle common fields
-        for i in 0..common_fields.len() {
-            // Find the index of the common field name and use that index to find its attr type
-            let common_field_index = fields.iter().position(|x| x == &common_fields[i]).unwrap();
-            let (field_snapshotable, struct_version) = field_is_snapshotable(&targets, field_types[common_field_index].as_str());
+    //     // Handle common fields
+    //     for i in 0..common_fields.len() {
+    //         // Find the index of the common field name and use that index to find its attr type
+    //         let common_field_index = fields.iter().position(|x| x == &common_fields[i]).unwrap();
+    //         let (field_snapshotable, struct_version) = field_is_snapshotable(&targets, field_types[common_field_index].as_str());
 
-            if field_snapshotable {
-                // This struct implements Snapshot, use that interface to serialize.
-                output.write_fmt(format_args!("{}self.{}.snapshot(id.clone() + \".{}\", {}, snapshot);\n", indent, common_fields[i], common_fields[i], struct_version))?;
-            } else {
-                output.write_fmt(format_args!("{}snapshot.set_object(SnapshotObjectType::Field, id.clone() + \"{}\", {}, &self.{});\n", indent, common_fields[i], target.version, common_fields[i]))?;
-            }
-        }
+    //         if field_snapshotable {
+    //             // This struct implements Snapshot, use that interface to serialize.
+    //             output.write_fmt(format_args!("{}self.{}.snapshot(id.clone() + \".{}\", {}, snapshot);\n", indent, common_fields[i], common_fields[i], struct_version))?;
+    //         } else {
+    //             output.write_fmt(format_args!("{}snapshot.set_object(SnapshotObjectType::Field, id.clone() + \"{}\", {}, &self.{});\n", indent, common_fields[i], target.version, common_fields[i]))?;
+    //         }
+    //     }
 
-        // Source/Target unique fields are not saved. Restore will handle their default values 
-        // if needed.
-        indent = indent[4..].to_string();
-        output.write_fmt(format_args!("{}}}\n", indent))?;
-    }
+    //     // Source/Target unique fields are not saved. Restore will handle their default values 
+    //     // if needed.
+    //     indent = indent[4..].to_string();
+    //     output.write_fmt(format_args!("{}}}\n", indent))?;
+    // }
 
-    // Same version
     output.write_fmt(format_args!("{}_ => {{ panic!(\"Attempted to translate to unknown version: {{}}\", version)}}\n", indent))?;
     indent = indent[4..].to_string();
     output.write_fmt(format_args!("{}}}\n", indent))?;
+    output.write_fmt(format_args!("{}result\n", indent))?;
+
     indent = indent[4..].to_string();
+
     output.write_fmt(format_args!("{}}}\n", indent))?;
     Ok(())
 }
@@ -256,9 +261,15 @@ fn generate_restore_fn(
     output: &mut dyn Write,
 ) -> std::io::Result<()> {
     output.write_fmt(format_args!(
-        "{}fn restore(id: String, snapshot: &mut Snapshot) -> Self {{\n",
+        // pub fn load_index<I: DeserializeOwned, R: Read>(mut reader: &mut R) -> I {
+        "{}fn restore<R: std::io::Read>(mut reader: &mut R) -> Self {{\n",
         parent_indent
     ))?;
+
+    // output.write_fmt(format_args!(
+    //     "{}{\n",
+    //     parent_indent
+    // ))?;
 
     let mut indent = String::from(parent_indent) + "    ";
     output.write_fmt(format_args!("{} {} {{\n", indent, struct_descriptor.ty))?;
@@ -273,44 +284,49 @@ fn generate_restore_fn(
 
         if field_snapshotable {
             // This struct implements Snapshot, use that interface to serialize.
-            output.write_fmt(format_args!("{}{}: {}::restore(id.clone() + \".{}\", snapshot),\n", indent, fields[i], field_types[i], fields[i]))?;
+            output.write_fmt(format_args!("{}{}: {}::restore(data),\n", indent, fields[i], field_types[i]))?;
             continue;
+        } else {
+            output.write_fmt(format_args!("{}{}: {{
+                bincode::deserialize_from(&mut reader).unwrap()
+            }} ,\n", indent, fields[i]))?;
         }
 
-        // Get default field value
-        if let Some(default_attribute) = field_attrs[i].iter().find(|&x| x.name == "default") {
-            output.write_fmt(format_args!("{}// snapshot default attr = {:?}\n", indent, default_attribute));
-            match &default_attribute.value {
-                syn::Lit::Str(lit_str) => {
-                    output.write_fmt(format_args!(
-                        "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or(\"{}\".to_owned()),\n",
-                        indent, fields[i], fields[i], lit_str.value()
-                    ))?;
-                }
-                syn::Lit::Int(lit_int) => {
-                    let literal: u64 = lit_int.base10_parse().unwrap();
-                    output.write_fmt(format_args!(
-                        "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or({}),\n",
-                        indent, fields[i], fields[i], literal
-                    ))?;
-                }
-                syn::Lit::Bool(lit_bool) => {
-                    output.write_fmt(format_args!(
-                        "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or({}),\n",
-                        indent, fields[i], fields[i], lit_bool.value
-                    ))?;
-                }
-                // syn::Lit::Byte(LitByte),
-                // syn::Lit::Char(LitChar),
-                // syn::Lit::Float(LitFloat),
-                _ => {
-                    panic!("Unsupported default value literal");
-                } 
-            }
-        } else {
-            // Use Default trait.
-            output.write_fmt(format_args!("{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
-        }
+
+        // // Get default field value
+        // if let Some(default_attribute) = field_attrs[i].iter().find(|&x| x.name == "default") {
+        //     output.write_fmt(format_args!("{}// snapshot default attr = {:?}\n", indent, default_attribute));
+        //     match &default_attribute.value {
+        //         syn::Lit::Str(lit_str) => {
+        //             output.write_fmt(format_args!(
+        //                 "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or(\"{}\".to_owned()),\n",
+        //                 indent, fields[i], fields[i], lit_str.value()
+        //             ))?;
+        //         }
+        //         syn::Lit::Int(lit_int) => {
+        //             let literal: u64 = lit_int.base10_parse().unwrap();
+        //             output.write_fmt(format_args!(
+        //                 "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or({}),\n",
+        //                 indent, fields[i], fields[i], literal
+        //             ))?;
+        //         }
+        //         syn::Lit::Bool(lit_bool) => {
+        //             output.write_fmt(format_args!(
+        //                 "{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or({}),\n",
+        //                 indent, fields[i], fields[i], lit_bool.value
+        //             ))?;
+        //         }
+        //         // syn::Lit::Byte(LitByte),
+        //         // syn::Lit::Char(LitChar),
+        //         // syn::Lit::Float(LitFloat),
+        //         _ => {
+        //             panic!("Unsupported default value literal");
+        //         } 
+        //     }
+        // } else {
+        //     // Use Default trait.
+        //     output.write_fmt(format_args!("{}{}: snapshot.get_object(id.clone() + \"{}\").unwrap_or_default(),\n", indent, fields[i], fields[i]))?;
+        // }
     }
 
     indent = indent[4..].to_string();

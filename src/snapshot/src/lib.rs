@@ -1,18 +1,22 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 extern crate serde;
-extern crate serde_cbor;
 extern crate serde_derive;
 extern crate snapshot_derive;
+extern crate bincode;
+extern crate serde_json;
+
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
-use serde_cbor::{from_slice, to_vec, Deserializer};
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+include!("structs.rs");
 
 const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 
@@ -21,41 +25,13 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 ///  |----------------------------|
 ///  |         SnapshotHdr        |
 ///  |----------------------------|
-///  |          Objects           |
+///  |       Bincode blob         |
 ///  |----------------------------|
 ///
 /// The header contains snapshot format version, firecracker version
 /// and a description string.
-/// The objects ared stored as a vector of SnapshotObject entries which describe
-/// the data. The SnapshotObject structure is followed by the cbor serialized
-/// object.
-///
-/// The snapshot engine works as a data store, properties are created/read
-/// using get/set_object.
-///
-/// Loading a snapshot does not trigger any version translation, it simply
-/// loads all the objects into memory.
+/// The objects ared stored in a bincoden blob.
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SnapshotObjectType {
-    Field,
-    Struct,
-    NestedStruct,
-}
-
-type SnapshotBlob = Vec<u8>;
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-/// Describes a snapshot property.
-pub struct SnapshotObject {
-    kind: SnapshotObjectType,
-    // Object version
-    version: u16,
-    // Unique ID.
-    id: String,
-    // CBOR encoded data
-    data: Vec<u8>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotHdr {
@@ -68,8 +44,8 @@ struct SnapshotHdr {
 }
 
 pub struct Snapshot {
-    objects: HashMap<String, SnapshotObject>,
     file: Option<File>,
+    data: Vec<u8>,
 }
 
 /// Trait that provides an implementation to deconstruct/restore structs
@@ -77,193 +53,193 @@ pub struct Snapshot {
 /// This trait is automatically implemented on user specified structs
 /// or otherwise manually implemented.
 pub trait Snapshotable {
-    fn snapshot(&self, id: String, version: u16, snapshot: &mut Snapshot);
-    fn restore(id: String, snapshot: &mut Snapshot) -> Self;
+    fn snapshot(&self, version: u16) -> Vec<u8>;
+    fn restore<R: std::io::Read>(mut reader: &mut R) -> Self;
 }
 
 impl Snapshot {
     //// Public API 
     pub fn new_in_memory() -> std::io::Result<Snapshot> {
         Ok(Snapshot {
-            objects: HashMap::new(),
             file: None,
+            data: Vec::new(),
         })
     }
     pub fn new(path: &Path) -> std::io::Result<Snapshot> {
         let file = OpenOptions::new().create(true).write(true).open(path)?;
 
         Ok(Snapshot {
-            objects: HashMap::new(),
             file: Some(file),
+            data: Vec::new(),
         })
     }
 
     pub fn save_to_mem(&mut self, app_version: u16, description: String) -> std::io::Result<Vec<u8>> {
-        // Serialize the header.
         let hdr = SnapshotHdr {
             version: SNAPSHOT_FORMAT_VERSION,
             data_version: app_version,
             description,
         };
 
-        let mut snapshot_data = serde_cbor::to_vec(&hdr).unwrap();
-        let objects = self.save_objects();
+        let mut snapshot_data = bincode::serialize(&hdr).unwrap();
+        snapshot_data.append(&mut self.data);
 
-        snapshot_data.append(&mut  serde_cbor::to_vec(&objects).unwrap());
         Ok(snapshot_data)
     }
 
     pub fn save(&mut self, app_version: u16, description: String) -> std::io::Result<()> {
-        let snapshot_data = self.save_to_mem(app_version, description).unwrap();
+        self.data = self.save_to_mem(app_version, description).unwrap();
 
         let mut file = self.file.as_ref().unwrap();
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
 
-        file.write(&snapshot_data)?;
+        file.write(&self.data)?;
         file.sync_all()?;
 
         Ok(())
     }
 
-    pub fn load_from_mem(mem: &[u8]) -> std::io::Result<Snapshot> {
-        let mut snapshot_engine = Snapshot {
-            objects: HashMap::new(),
+    pub fn load_from_mem(mem: &mut [u8]) -> std::io::Result<Snapshot> {
+        let mut snapshot = Snapshot {
             file: None,
+            data: Vec::new(),
         };
 
-        let mut deserializer = Deserializer::from_slice(&mem);
-
         // Load the snapshot header.
-        let _hdr: SnapshotHdr = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-        let objects: Vec<SnapshotObject> = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-        snapshot_engine.load_objects(objects);
+        let hdr: SnapshotHdr = bincode::deserialize(&mem).unwrap();
+        let hdr_size = bincode::serialized_size(&hdr).unwrap() as usize;
+
+        // Store the bincode blob.
+        snapshot.data = mem[hdr_size..].to_vec();
         
-        Ok(snapshot_engine)
+        Ok(snapshot)
     }
 
     pub fn load(path: &Path) -> std::io::Result<Snapshot> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        let mut file_slice = Vec::new();
-        file.read_to_end(&mut file_slice)?;
+        let mut slice = Vec::new();
+        file.read_to_end(&mut slice)?;
 
-        Self::load_from_mem(file_slice.as_slice())
+        Self::load_from_mem(&mut slice)
     }
 
     /// Restore an object with specified id and type.
-    pub fn restore_object<D>(&mut self, id: String) -> D
+    pub fn deserialize<D>(&mut self) -> D
     where
         D: Snapshotable + 'static,
     {
-        D::restore(id, self)
+        let mut slice = self.data.as_slice();
+        D::restore(&mut slice)
     }
 
     /// Store an object with specified id and type.
-    pub fn store_object<S>(&mut self, id: String, version: u16, object: &S)
+    pub fn serialize<S>(&mut self, version: u16, object: &S)
     where
         S: Snapshotable + 'static,
     {
-        object.snapshot(id, version, self);
-    }
-
-    /// Low level fn to set a snapshot property. 
-    pub fn set_object<T: serde::ser::Serialize + 'static>(
-        &mut self,
-        kind: SnapshotObjectType,
-        id: String,
-        version: u16,
-        data: &T,
-    ) {
-        self.set_raw_object(kind, id, version, serde_cbor::to_vec(data).unwrap())
-    }
-
-    /// Low level fn to get a snapshot property. 
-    pub fn get_object<T: serde::de::DeserializeOwned + 'static>(
-        &mut self,
-        id: String,
-    ) -> Option<T> {
-        self.get_raw_object(id).map(|snapshot_object| {
-            let mut deserializer = Deserializer::from_slice(snapshot_object);
-            let object: T = serde::de::Deserialize::deserialize(&mut deserializer).unwrap();
-            object
-        })
-    }
-
-    //// Internal APIs
-    pub(crate) fn get_raw_object(&self, id: String) -> Option<&Vec<u8>> {
-        if let Some(object) = self.objects.get(&id) {
-            return Some(&object.data)
-        }
-        None
-    }
-
-    pub(crate) fn set_raw_object(
-        &mut self,
-        kind: SnapshotObjectType,
-        id: String,
-        version: u16,
-        data: SnapshotBlob,
-    ) {
-        let object = SnapshotObject {
-            kind,
-            version,
-            id: id.clone(),
-            data
-        };
-        self.objects.insert(id, object);
-    }
-
-    // Returns the objects to be saved.
-    fn save_objects(&mut self) -> Vec<&SnapshotObject> {
-        let mut objects = Vec::new();
-
-        for (_, snapshot_object) in &self.objects {
-            objects.push(snapshot_object);
-        }
-
-        objects
-    }
-
-    fn load_objects(&mut self, objects: Vec<SnapshotObject>) {
-        for object in objects {
-            self.objects.insert(
-                object.id.clone(),
-                object
-            );
-        }
+        self.data = object.snapshot(version);
     }
 }
 
+include!("/tmp/translator.rs");
 
+#[inline]
+pub fn bench_1mil_save_restore() {
+    let mut snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
+    
+    for i in 0..10000 {
+        let x: MmioDeviceState = snapshot.deserialize();
+    }
+
+}
 
 mod tests {
     use super::*;
-    include!("structs.rs");
-    include!("/tmp/translator.rs");
-
+    
     #[test]
     fn test_save() {
         let mut snapshot = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
-        let p = Test_V1 {
-            field1: 10,
-            field2: "Andrei".to_owned(),
-            field3: vec![1; 3],
+
+        let state = MmioDeviceState {
+            addr: 1234,
+            irq: 3,
+            device_activated: true,
+            features_select: 123456,
+            acked_features_select: 653421,
+            queue_select: 2,
+            interrupt_status: 88,
+            driver_status: 0,
+            config_generation: 0,
+            queues: vec![0; 64],
+            flag: 90,
         };
-
-        println!("Saving struct as {:?}", &p);
-
-        snapshot.store_object("test_object".to_owned(), 2, &p);
+        snapshot.serialize(2, &state);
         snapshot.save(1, "Testing".to_owned()).unwrap();
 
+        // let state = MmioDeviceState {
+        //     addr: 1234,
+        //     irq: 3,
+        //     device_activated: true,
+        //     features_select: 123456,
+        //     acked_features_select: 653421,
+        //     queue_select: 2,
+        //     interrupt_status: 88,
+        //     driver_status: 0,
+        //     config_generation: 0,
+        //     queues: vec![0; 64],
+        //     flag: 90,
+        // };
+
         snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
-        let x: Test_V3 = snapshot.restore_object("test_object".to_owned());
-        let y: Test_V2 = snapshot.restore_object("test_object".to_owned());
-        let z: Test_V1 = snapshot.restore_object("test_object".to_owned());
+
+        let x: MmioDeviceState = snapshot.deserialize();
+        // let y: MmioDeviceState_v1 = snapshot.restore_object("test_object0".to_owned());
 
         println!("Restore as {:?}", x);
-        println!("Restore as {:?}", y);
-        println!("Restore as {:?}", z);
+        // println!("Restore as {:?}", y);
+
+        println!("ToJson = {}", serde_json::to_string(&x).unwrap());
 
         assert!(false);
     }
+    // fn test_save() {
+    //     let mut snapshot = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
+
+    //     for i in 1..1000 {
+    //         let p = Test_V1 {
+    //             field1: i,
+    //             field2: format!("xxx{}", i).to_owned(),
+    //             field3: vec![i as u8; 8],
+    //         };
+    //         snapshot.store_object(format!("test_object{}", i).to_owned(), 2, &p);
+
+    //     }
+
+    //     snapshot.save(1, "Testing".to_owned()).unwrap();
+    //     println!("Saved {} ", snapshot.data_size);
+    //     let snap = SnapshotObject {
+    //         kind: SnapshotObjectType::Field,
+    //         id: "xxx".to_owned(),
+    //         version: 0,
+    //         offset: 0,
+    //         len: 0
+    //     };
+    //     println!("Object metadata size per field {} ",  bincode::serialized_size(&snap).unwrap());
+
+
+    //     snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
+
+    //     let x: Test_V3 = snapshot.restore_object("test_object0".to_owned());
+    //     let y: Test_V2 = snapshot.restore_object("test_object1".to_owned());
+    //     let z: Test_V1 = snapshot.restore_object("test_object2".to_owned());
+
+    //     println!("Restore as {:?}", x);
+    //     println!("Restore as {:?}", y);
+    //     println!("Restore as {:?}", z);
+
+    //     println!("ToJson = {}", serde_json::to_string(&z).unwrap());
+
+    //     assert!(false);
+    // }
 }
