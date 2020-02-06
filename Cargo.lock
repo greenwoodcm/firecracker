@@ -137,6 +137,7 @@ dependencies = [
  "rate_limiter 0.1.0",
  "sys_util 0.1.0",
  "tempfile 3.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "timerfd 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "virtio_gen 0.1.0",
 ]
 

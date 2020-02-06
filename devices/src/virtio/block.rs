@@ -8,19 +8,24 @@
 use epoll;
 use std::cmp;
 use std::convert::From;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::mpsc::channel;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use logger::{Metric, METRICS};
 use memory_model::{DataInit, GuestAddress, GuestMemory, GuestMemoryError};
 use rate_limiter::{RateLimiter, TokenType};
+use std::time::Duration;
 use sys_util::EventFd;
+use timerfd::{ClockId, SetTimeFlags, TimerFd, TimerState};
 use virtio_gen::virtio_blk::*;
 
 use super::{
@@ -35,13 +40,16 @@ pub const SECTOR_SIZE: u64 = (0x01 as u64) << SECTOR_SHIFT;
 const QUEUE_SIZE: u16 = 256;
 const NUM_QUEUES: usize = 1;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
+const WORKER_COUNT: usize = 4;
 
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: DeviceEventT = 0;
 // Rate limiter budget is now available.
 const RATE_LIMITER_EVENT: DeviceEventT = 1;
+const COALESCE_EVENT: DeviceEventT = 2;
+const WORKER_EVENT: DeviceEventT = 3;
 // Number of DeviceEventT events supported by this implementation.
-pub const BLOCK_EVENTS_COUNT: usize = 2;
+pub const BLOCK_EVENTS_COUNT: usize = 4;
 
 #[derive(Debug)]
 enum Error {
@@ -144,6 +152,7 @@ struct Request {
     data_addr: GuestAddress,
     data_len: u32,
     status_addr: GuestAddress,
+    desc_index: u16,
 }
 
 /// The request header represents the mandatory fields of each block device request.
@@ -197,6 +206,7 @@ impl Request {
             data_addr: GuestAddress(0),
             data_len: 0,
             status_addr: GuestAddress(0),
+            desc_index: avail_desc.index,
         };
 
         let data_desc;
@@ -300,6 +310,13 @@ impl Request {
     }
 }
 
+unsafe impl Sync for VirtIOCompletion {}
+unsafe impl Send for VirtIOCompletion {}
+pub struct VirtIOCompletion {
+    desc_index: u16,
+    len: u32,
+}
+
 /// Handler that drives the execution of the Block devices
 pub struct BlockEpollHandler {
     queues: Vec<Queue>,
@@ -311,10 +328,20 @@ pub struct BlockEpollHandler {
     queue_evt: EventFd,
     rate_limiter: RateLimiter,
     disk_image_id: Vec<u8>,
+    coalesce: u32,
+    coalesce_threshold: u32,
+    coalesce_timer: TimerFd,
+    coalesce_timer_armed: bool,
+    recv_completion: std::sync::mpsc::Receiver<VirtIOCompletion>,
+    send_work: Vec<std::sync::mpsc::Sender<Request>>,
+    worker_event: EventFd,
+    current_worker: usize,
 }
 
 impl BlockEpollHandler {
     fn process_queue(&mut self, queue_index: usize) -> bool {
+        let mut bs_sum: u32 = 0;
+        let mut bs_count = 0;
         let queue = &mut self.queues[queue_index];
         let mut used_any = false;
 
@@ -348,43 +375,60 @@ impl BlockEpollHandler {
                             break;
                         }
                     }
-                    let status = match request.execute(
-                        &mut self.disk_image,
-                        self.disk_nsectors,
-                        &self.mem,
-                        &self.disk_image_id,
-                    ) {
-                        Ok(l) => {
-                            len = l;
-                            VIRTIO_BLK_S_OK
-                        }
-                        Err(e) => {
-                            error!("Failed to execute request: {:?}", e);
-                            METRICS.block.invalid_reqs_count.inc();
-                            len = 1; // We need at least 1 byte for the status.
-                            e.status()
-                        }
-                    };
-                    // We use unwrap because the request parsing process already checked that the
-                    // status_addr was valid.
-                    self.mem
-                        .write_obj_at_addr(status, request.status_addr)
-                        .unwrap();
+                    bs_sum += request.data_len;
+                    bs_count += 1;
+
+                    self.send_work[self.current_worker].send(request).unwrap();
+                    self.current_worker = (self.current_worker + 1) % WORKER_COUNT;
+
+                    // let status = match request.execute(
+                    //     &mut self.disk_image,
+                    //     self.disk_nsectors,
+                    //     &self.mem,
+                    //     &self.disk_image_id,
+                    // ) {
+                    //     Ok(l) => {
+                    //         len = l;
+                    //         VIRTIO_BLK_S_OK
+                    //     }
+                    //     Err(e) => {
+                    //         error!("Failed to execute request: {:?}", e);
+                    //         METRICS.block.invalid_reqs_count.inc();
+                    //         len = 1; // We need at least 1 byte for the status.
+                    //         e.status()
+                    //     }
+                    // };
+                    // // We use unwrap because the request parsing process already checked that the
+                    // // status_addr was valid.
+                    // self.mem
+                    //     .write_obj_at_addr(status, request.status_addr)
+                    //     .unwrap();
                 }
                 Err(e) => {
                     error!("Failed to parse available descriptor chain: {:?}", e);
                     METRICS.block.execute_fails.inc();
+
+                    // Handle errored descs.
                     len = 0;
+                    queue.add_used(&self.mem, head.index, len);
+                    self.coalesce += 1;
+                    used_any = true;
                 }
             }
-            queue.add_used(&self.mem, head.index, len);
-            used_any = true;
+
+            // queue.add_used(&self.mem, head.index, len);
+            // self.coalesce += 1;
+            // used_any = true;
+        }
+
+        if bs_count > 0 {
+            self.compute_coalesce_threshold(bs_sum / bs_count);
         }
 
         used_any
     }
 
-    fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
+    fn signal_used_queue(&mut self) -> result::Result<(), DeviceError> {
         self.interrupt_status
             .fetch_or(VIRTIO_MMIO_INT_VRING as usize, Ordering::SeqCst);
         self.interrupt_evt.write(1).map_err(|e| {
@@ -406,6 +450,15 @@ impl BlockEpollHandler {
         METRICS.block.update_count.inc();
         Ok(())
     }
+
+    pub fn compute_coalesce_threshold(&mut self, avg_bs: u32) {
+        match avg_bs {
+            0..=4096 => self.coalesce_threshold = 16,
+            4097..=16184 => self.coalesce_threshold = 8,
+            16185..=129472 => self.coalesce_threshold = 4,
+            _ => self.coalesce_threshold = 4,
+        }
+    }
 }
 
 impl EpollHandler for BlockEpollHandler {
@@ -417,29 +470,99 @@ impl EpollHandler for BlockEpollHandler {
         match device_event {
             QUEUE_AVAIL_EVENT => {
                 METRICS.block.queue_event_count.inc();
-                if let Err(e) = self.queue_evt.read() {
-                    error!("Failed to get queue event: {:?}", e);
-                    METRICS.block.event_fails.inc();
-                    Err(DeviceError::FailedReadingQueue {
-                        event_type: "queue event",
-                        underlying: e,
-                    })
-                } else if !self.rate_limiter.is_blocked() && self.process_queue(0) {
-                    self.signal_used_queue()
-                } else {
-                    // While limiter is blocked, don't process any more requests.
-                    Ok(())
+                match self.queue_evt.read() {
+                    Ok(_) => {
+                        if !self.rate_limiter.is_blocked() && self.process_queue(0) {
+                            if self.coalesce > self.coalesce_threshold {
+                                self.coalesce = 0;
+                                self.signal_used_queue()
+                            } else if self.coalesce > 0 && !self.coalesce_timer_armed {
+                                // We have processed some descriptors, arm timer.
+                                let timer_state = TimerState::Oneshot(Duration::from_millis(5));
+
+                                self.coalesce_timer
+                                    .set_state(timer_state, SetTimeFlags::Default);
+                                self.coalesce_timer_armed = true;
+                                Ok(())
+                            } else {
+                                Ok(())
+                            }
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to get queue event: {:?}", e);
+                        METRICS.block.event_fails.inc();
+                        Err(DeviceError::FailedReadingQueue {
+                            event_type: "queue event",
+                            underlying: e,
+                        })
+                    }
                 }
+                // if let Err(e) = self.queue_evt.read() {
+                //     error!("Failed to get queue event: {:?}", e);
+                //     METRICS.block.event_fails.inc();
+                //     Err(DeviceError::FailedReadingQueue {
+                //         event_type: "queue event",
+                //         underlying: e,
+                //     })
+                // } else if !self.rate_limiter.is_blocked() && self.process_queue(0) {
+                //     self.signal_used_queue()
+                // } else {
+                //     // While limiter is blocked, don't process any more requests.
+                //     Ok(())
+                // }
             }
             RATE_LIMITER_EVENT => {
                 METRICS.block.rate_limiter_event_count.inc();
                 // Upon rate limiter event, call the rate limiter handler
                 // and restart processing the queue.
                 if self.rate_limiter.event_handler().is_ok() && self.process_queue(0) {
+                    if self.coalesce > 8 {
+                        self.coalesce = 0;
+                        self.signal_used_queue()
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            COALESCE_EVENT => {
+                if self.coalesce > 0 {
+                    self.coalesce = 0;
+                    self.coalesce_timer.read();
+                    self.coalesce_timer_armed = false;
                     self.signal_used_queue()
                 } else {
                     Ok(())
                 }
+            }
+            WORKER_EVENT => {
+                // println!("Worker event" );
+                self.worker_event.read().unwrap();
+                // Process completions.
+                loop {
+                    match self.recv_completion.try_recv() {
+                        Ok(completion) => {
+                            self.queues[0].add_used(
+                                &self.mem,
+                                completion.desc_index,
+                                completion.len,
+                            );
+                            self.coalesce += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                self.signal_used_queue()
+
+                // if self.coalesce > self.coalesce_threshold {
+                //     self.coalesce = 0;
+                //     self.signal_used_queue()?
+                // }
+                // Ok(())
             }
             unknown => Err(DeviceError::UnknownEvent {
                 device: "block",
@@ -452,6 +575,8 @@ impl EpollHandler for BlockEpollHandler {
 pub struct EpollConfig {
     q_avail_token: u64,
     rate_limiter_token: u64,
+    coalesce_token: u64,
+    worker_token: u64,
     epoll_raw_fd: RawFd,
     sender: mpsc::Sender<Box<dyn EpollHandler>>,
 }
@@ -465,6 +590,8 @@ impl EpollConfigConstructor for EpollConfig {
         EpollConfig {
             q_avail_token: first_token + u64::from(QUEUE_AVAIL_EVENT),
             rate_limiter_token: first_token + u64::from(RATE_LIMITER_EVENT),
+            coalesce_token: first_token + u64::from(COALESCE_EVENT),
+            worker_token: first_token + u64::from(WORKER_EVENT),
             epoll_raw_fd,
             sender,
         }
@@ -473,6 +600,7 @@ impl EpollConfigConstructor for EpollConfig {
 
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct Block {
+    disk_path: Option<std::path::PathBuf>,
     disk_image: Option<File>,
     disk_nsectors: u64,
     avail_features: u64,
@@ -500,6 +628,7 @@ impl Block {
     /// The given file must be seekable and sizable.
     pub fn new(
         mut disk_image: File,
+        disk_path: std::path::PathBuf,
         is_disk_read_only: bool,
         epoll_config: EpollConfig,
         rate_limiter: Option<RateLimiter>,
@@ -521,6 +650,7 @@ impl Block {
 
         Ok(Block {
             disk_image: Some(disk_image),
+            disk_path: Some(disk_path),
             disk_nsectors: disk_size / SECTOR_SIZE,
             avail_features,
             acked_features: 0u64,
@@ -601,7 +731,57 @@ impl VirtioDevice for Block {
             let queue_evt_raw_fd = queue_evt.as_raw_fd();
 
             let disk_image_id = build_disk_image_id(&disk_image);
-            let handler = BlockEpollHandler {
+
+            let mut work_senders = Vec::new();
+            let (completion_tx, completion_rx) = channel();
+
+            let worker_event = EventFd::new().unwrap();
+
+            // Create thread pool and channels
+            for i in 0..WORKER_COUNT {
+                // Register blk worker events
+
+                let (work_sender, worker_receiver) = channel();
+                work_senders.push(work_sender);
+                let mem_clone = mem.clone();
+                let block_file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.disk_path.as_ref().unwrap())
+                    .unwrap();
+
+                let completion_tx_clone = completion_tx.clone();
+                let nsectors_clone = self.disk_nsectors;
+                let disk_image_id_clone = disk_image_id.clone();
+                let worker_event_clone = worker_event.try_clone().unwrap();
+
+                thread::Builder::new()
+                    .name(format!("blk_worker_{}", i).to_string())
+                    .spawn(move || {
+                        worker_thread(
+                            worker_event_clone,
+                            mem_clone,
+                            block_file,
+                            nsectors_clone,
+                            disk_image_id_clone,
+                            worker_receiver,
+                            completion_tx_clone,
+                        )
+                    });
+            }
+
+            epoll::ctl(
+                self.epoll_config.epoll_raw_fd,
+                epoll::ControlOptions::EPOLL_CTL_ADD,
+                worker_event.as_raw_fd(),
+                epoll::Event::new(epoll::Events::EPOLLIN, self.epoll_config.worker_token),
+            )
+            .map_err(|e| {
+                METRICS.block.activate_fails.inc();
+                ActivateError::EpollCtl(e)
+            })?;
+
+            let mut handler = BlockEpollHandler {
                 queues,
                 mem,
                 disk_image,
@@ -611,8 +791,33 @@ impl VirtioDevice for Block {
                 queue_evt,
                 rate_limiter: self.rate_limiter.take().unwrap_or_default(),
                 disk_image_id,
+                coalesce_timer: TimerFd::new_custom(ClockId::Monotonic, true, true).unwrap(),
+                coalesce: 0,
+                coalesce_threshold: 0,
+                coalesce_timer_armed: false,
+                send_work: work_senders,
+                recv_completion: completion_rx,
+                current_worker: 0,
+                worker_event,
             };
             let rate_limiter_rawfd = handler.rate_limiter.as_raw_fd();
+
+            let timer_state = TimerState::Oneshot(Duration::from_millis(10));
+
+            handler
+                .coalesce_timer
+                .set_state(timer_state, SetTimeFlags::Default);
+
+            epoll::ctl(
+                self.epoll_config.epoll_raw_fd,
+                epoll::ControlOptions::EPOLL_CTL_ADD,
+                handler.coalesce_timer.as_raw_fd(),
+                epoll::Event::new(epoll::Events::EPOLLIN, self.epoll_config.coalesce_token),
+            )
+            .map_err(|e| {
+                METRICS.block.activate_fails.inc();
+                ActivateError::EpollCtl(e)
+            })?;
 
             // The channel should be open at this point.
             self.epoll_config
@@ -649,6 +854,47 @@ impl VirtioDevice for Block {
         }
         METRICS.block.activate_fails.inc();
         Err(ActivateError::BadActivate)
+    }
+}
+
+fn worker_thread<T: Seek + Read + Write>(
+    worker_event: EventFd,
+    mem: GuestMemory,
+    mut disk: T,
+    disk_nsectors: u64,
+    disk_image_id: Vec<u8>,
+    recv: std::sync::mpsc::Receiver<Request>,
+    completion: std::sync::mpsc::Sender<VirtIOCompletion>,
+) {
+    loop {
+        let request = recv.recv().unwrap();
+        let len;
+        let status = match request.execute(&mut disk, disk_nsectors, &mem, &disk_image_id) {
+            Ok(l) => {
+                len = l;
+                VIRTIO_BLK_S_OK
+            }
+            Err(e) => {
+                error!("Failed to execute request: {:?}", e);
+                METRICS.block.invalid_reqs_count.inc();
+                len = 1; // We need at least 1 byte for the status.
+                e.status()
+            }
+        };
+        // We use unwrap because the request parsing process already checked that the
+        // status_addr was valid.
+        mem.write_obj_at_addr(status, request.status_addr).unwrap();
+
+        // std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        // println!("Completed {} len {}", request.desc_index, len);
+        completion
+            .send(VirtIOCompletion {
+                desc_index: request.desc_index,
+                len,
+            })
+            .unwrap();
+
+        worker_event.write(1).unwrap();
     }
 }
 

@@ -550,6 +550,7 @@ impl Vmm {
             let block_box = Box::new(
                 devices::virtio::Block::new(
                     block_file,
+                    drive_config.path_on_host.clone(),
                     drive_config.is_read_only,
                     epoll_config,
                     rate_limiter,
