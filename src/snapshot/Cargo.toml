@@ -2,7 +2,7 @@
 name = "snapshot"
 version = "0.0.1"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
-build = "src/write_code_pls.rs"
+# build = "src/write_code_pls.rs"
 
 [dependencies]
 serde = ">=1.0.27"
