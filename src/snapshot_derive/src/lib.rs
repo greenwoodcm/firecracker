@@ -153,10 +153,10 @@ impl Field {
         if source_version < self.start_version || (self.end_version > 0 && source_version > self.end_version) {
            if let Some(default) = self.get_default() {
                 return quote! {
-                    #field_ident: #default
+                    #field_ident: #default,
                 }
            } else {
-                return quote! { #field_ident: Default::default() }
+                return quote! { #field_ident: Default::default(), }
            }
         }
 
