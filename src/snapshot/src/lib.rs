@@ -1,18 +1,14 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+extern crate bincode;
 extern crate serde;
 extern crate serde_derive;
-extern crate snapshot_derive;
-extern crate bincode;
 extern crate serde_json;
+extern crate snapshot_derive;
 
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-
-use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
 use serde_derive::{Deserialize, Serialize};
-use snapshot_derive::Snapshot;
+use snapshot_derive::Versionize;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -32,7 +28,6 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 /// The header contains snapshot format version, firecracker version
 /// and a description string.
 /// The objects ared stored in a bincoden blob.
-
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotHdr {
@@ -54,15 +49,16 @@ pub struct Snapshot {
 /// This trait is automatically implemented on user specified structs
 /// or otherwise manually implemented.
 pub trait Versionize {
-    fn serialize(&self, version: u16) -> Vec<u8>;
+    fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version: u16);
     fn deserialize<R: std::io::Read>(mut reader: &mut R, version: u16) -> Self;
 
     // Returns struct name as string.
-    fn struct_name() -> String;
+    fn name() -> String;
+    fn version() -> u16;
 }
 
 impl Snapshot {
-    //// Public API 
+    //// Public API
     pub fn new_in_memory() -> std::io::Result<Snapshot> {
         Ok(Snapshot {
             file: None,
@@ -78,7 +74,11 @@ impl Snapshot {
         })
     }
 
-    pub fn save_to_mem(&mut self, app_version: u16, description: String) -> std::io::Result<Vec<u8>> {
+    pub fn save_to_mem(
+        &mut self,
+        app_version: u16,
+        description: String,
+    ) -> std::io::Result<Vec<u8>> {
         let hdr = SnapshotHdr {
             version: SNAPSHOT_FORMAT_VERSION,
             data_version: app_version,
@@ -116,7 +116,7 @@ impl Snapshot {
 
         // Store the bincode blob.
         snapshot.data = mem[hdr_size..].to_vec();
-        
+
         Ok(snapshot)
     }
 
@@ -128,7 +128,6 @@ impl Snapshot {
         Self::load_from_mem(&mut slice)
     }
 
-    /// Restore an object with specified id and type.
     pub fn deserialize<D>(&mut self) -> D
     where
         D: Versionize + 'static,
@@ -137,21 +136,102 @@ impl Snapshot {
         D::deserialize(&mut slice, 1)
     }
 
-    /// Store an object with specified id and type.
     pub fn serialize<S>(&mut self, version: u16, object: &S)
     where
         S: Versionize + 'static,
     {
-        self.data = object.serialize(version);
+        // self.data.resize(1024*1024*2, 0);
+        object.serialize(&mut self.data, version);
     }
 }
 
-// include!("/tmp/translator.rs");
+macro_rules! primitive_versionize {
+    ($ty:ident) => {
+        impl Versionize for $ty {
+            #[inline]
+            fn serialize<W: std::io::Write>(&self, writer: &mut W, _version: u16) {
+                bincode::serialize_into(writer, &self).unwrap();
+            }
+            #[inline]
+            fn deserialize<R: std::io::Read>(mut reader: &mut R, _version: u16) -> Self {
+                bincode::deserialize_from(&mut reader).unwrap()
+            }
+
+            // Not used.
+            fn name() -> String {
+                String::new()
+            }
+            // Not used.
+            fn version() -> u16 {
+                0
+            }
+        }
+    };
+}
+
+primitive_versionize!(bool);
+primitive_versionize!(isize);
+primitive_versionize!(i8);
+primitive_versionize!(i16);
+primitive_versionize!(i32);
+primitive_versionize!(i64);
+primitive_versionize!(usize);
+primitive_versionize!(u8);
+primitive_versionize!(u16);
+primitive_versionize!(u32);
+primitive_versionize!(u64);
+primitive_versionize!(f32);
+primitive_versionize!(f64);
+primitive_versionize!(char);
+primitive_versionize!(String);
+// primitive_versionize!(Option<T>);
+
+// primitive_versionize!(str);
+
+#[cfg(feature = "std")]
+primitive_versionize!(CStr);
+#[cfg(feature = "std")]
+primitive_versionize!(CString);
+
+impl<T> Versionize for Vec<T>
+where
+    T: Versionize,
+{
+    #[inline]
+    fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version: u16) {
+        // Serialize in the same fashion as bincode:
+        // len, T, T, ...
+        bincode::serialize_into(&mut writer, &self.len()).unwrap();
+        for obj in self {
+            obj.serialize(writer, version);
+        }
+    }
+
+    #[inline]
+    fn deserialize<R: std::io::Read>(mut reader: &mut R, version: u16) -> Self {
+        let mut v = Vec::new();
+        let len: u64 = bincode::deserialize_from(&mut reader).unwrap();
+        for i in 0..len {
+            let obj: T = T::deserialize(reader, version);
+            v.push(obj);
+        }
+        v
+    }
+
+    // Not used.
+    fn name() -> String {
+        String::new()
+    }
+    // Not used.
+    fn version() -> u16 {
+        0
+    }
+}
 
 // #[inline]
 // pub fn bench_1mil_save_restore() {
 //     let mut snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
-    
+
 //     for i in 0..10000 {
 //         let x: MmioDeviceState = snapshot.deserialize();
 //     }
@@ -160,8 +240,24 @@ impl Snapshot {
 
 mod tests {
     use super::*;
-    
-    #[derive(Snapshot, Serialize, Deserialize, Debug, PartialEq)]
+
+    #[derive(Copy, Debug, Clone, Versionize, PartialEq)]
+    pub enum TestState {
+        #[snapshot(default = 128, end_version = 3)]
+        One(u32), // 1
+        #[snapshot(default = 128, start_version = 2)]
+        Two(String), // 2
+        #[snapshot(default = 128, start_version = 3)]
+        Three, //3
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Debug, Clone, Versionize, PartialEq)]
+    pub struct kvm_lapic_state {
+        pub regs: [::std::os::raw::c_char; 32],
+    }
+
+    #[derive(Versionize, Debug, PartialEq)]
     pub struct MmioDeviceState {
         pub addr: u64,
         pub irq: u32,
@@ -173,16 +269,11 @@ mod tests {
         pub driver_status: u32,
         pub config_generation: u32,
         pub queues: Vec<u8>,
+        pub lapic: kvm_lapic_state,
         #[snapshot(default = 128, start_version = 2)]
         pub flag: u8,
         #[snapshot(start_version = 3)]
         pub error: u64,
-    }
-
-    #[repr(C)]
-    #[derive(Copy,Debug,Clone, Snapshot)]
-    pub struct kvm_lapic_state {
-        pub regs: [::std::os::raw::c_char; 32],
     }
 
     #[test]
@@ -190,9 +281,7 @@ mod tests {
         let mut snapshot = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
 
         let regs = [-5; 32usize];
-        let lapic = kvm_lapic_state {
-            regs
-        };
+        let lapic = kvm_lapic_state { regs };
 
         let state = MmioDeviceState {
             addr: 1234,
@@ -205,19 +294,21 @@ mod tests {
             driver_status: 0,
             config_generation: 0,
             queues: vec![0; 64],
+            lapic: lapic,
             flag: 90,
             error: 123,
         };
-        snapshot.serialize(1, &lapic);
+
+        snapshot.serialize(3, &state);
         snapshot.save(1, "Testing".to_owned()).unwrap();
 
+        println!("Saved");
         snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
 
-        // let x: MmioDeviceState = snapshot.deserialize();
-        let y: kvm_lapic_state = snapshot.deserialize();
+        let x: MmioDeviceState = snapshot.deserialize();
 
-        // println!("Restore as {:?}", x);
-        println!("Restore as {:?}", y);
+        println!("Restore as {:?}", x);
+        // println!("Restore as {:?}", y);
 
         // println!("ToJson = {}", serde_json::to_string(&x).unwrap());
 
