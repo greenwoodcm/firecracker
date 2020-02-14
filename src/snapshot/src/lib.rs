@@ -6,10 +6,8 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate snapshot_derive;
 
-use serde::ser::Serialize;
 use serde_derive::{Deserialize, Serialize};
 use snapshot_derive::Versionize;
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -49,8 +47,8 @@ pub struct Snapshot {
 /// This trait is automatically implemented on user specified structs
 /// or otherwise manually implemented.
 pub trait Versionize {
-    fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version: u16);
-    fn deserialize<R: std::io::Read>(mut reader: &mut R, version: u16) -> Self;
+    fn serialize<W: std::io::Write>(&self, writer: &mut W, version: u16);
+    fn deserialize<R: std::io::Read>(reader: &mut R, version: u16) -> Self;
 
     // Returns struct name as string.
     fn name() -> String;
@@ -211,7 +209,7 @@ where
     fn deserialize<R: std::io::Read>(mut reader: &mut R, version: u16) -> Self {
         let mut v = Vec::new();
         let len: u64 = bincode::deserialize_from(&mut reader).unwrap();
-        for i in 0..len {
+        for _ in 0..len {
             let obj: T = T::deserialize(reader, version);
             v.push(obj);
         }
@@ -241,14 +239,31 @@ where
 mod tests {
     use super::*;
 
-    #[derive(Copy, Debug, Clone, Versionize, PartialEq)]
+    #[repr(u32)]
+    #[derive(Debug, Versionize, Serialize, Deserialize, PartialEq)]
     pub enum TestState {
-        #[snapshot(default = 128, end_version = 3)]
-        One(u32), // 1
-        #[snapshot(default = 128, start_version = 2)]
-        Two(String), // 2
-        #[snapshot(default = 128, start_version = 3)]
-        Three, //3
+        One = 1,
+        #[snapshot(start_version = 2, default_fn = "test_state_default_One")]
+        Two = 2,
+        #[snapshot(start_version = 3, default_fn = "test_state_default_One")]
+        Three = 3,
+    }
+
+    impl Default for TestState {
+        fn default() -> Self {
+            Self::One
+        }
+    }
+
+    fn test_state_default_One(input: &TestState, target_version: u16) -> TestState {
+        match target_version {
+            2 => {
+                TestState::One
+            }
+            a => {
+                TestState::One
+            }
+        }
     }
 
     #[repr(C)]
@@ -269,11 +284,13 @@ mod tests {
         pub driver_status: u32,
         pub config_generation: u32,
         pub queues: Vec<u8>,
-        pub lapic: kvm_lapic_state,
+        pub lapics: Vec<kvm_lapic_state>,
         #[snapshot(default = 128, start_version = 2)]
         pub flag: u8,
         #[snapshot(start_version = 3)]
         pub error: u64,
+        #[snapshot(start_version = 3)]
+        pub test: TestState,
     }
 
     #[test]
@@ -283,7 +300,7 @@ mod tests {
         let regs = [-5; 32usize];
         let lapic = kvm_lapic_state { regs };
 
-        let state = MmioDeviceState {
+        let mut state = MmioDeviceState {
             addr: 1234,
             irq: 3,
             device_activated: true,
@@ -294,12 +311,17 @@ mod tests {
             driver_status: 0,
             config_generation: 0,
             queues: vec![0; 64],
-            lapic: lapic,
+            lapics: Vec::new(),
             flag: 90,
             error: 123,
+            test: TestState::Two
         };
 
-        snapshot.serialize(3, &state);
+        state.lapics.push(lapic.clone());
+        state.lapics.push(lapic.clone());
+        state.lapics.push(lapic.clone());
+
+        snapshot.serialize(1, &state);
         snapshot.save(1, "Testing".to_owned()).unwrap();
 
         println!("Saved");
