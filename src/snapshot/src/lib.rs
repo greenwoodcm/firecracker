@@ -6,6 +6,9 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate snapshot_derive;
 
+pub mod version_map;
+
+use version_map::VersionMap;
 use serde_derive::{Deserialize, Serialize};
 use snapshot_derive::Versionize;
 use std::fs::{File, OpenOptions};
@@ -27,7 +30,7 @@ const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 /// and a description string.
 /// The objects ared stored in a bincoden blob.
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 struct SnapshotHdr {
     /// Snapshot format version.
     version: u16,
@@ -38,8 +41,10 @@ struct SnapshotHdr {
 }
 
 pub struct Snapshot {
+    hdr: SnapshotHdr,
     file: Option<File>,
     data: Vec<u8>,
+    version_map: VersionMap,
 }
 
 /// Trait that provides an implementation to deconstruct/restore structs
@@ -47,8 +52,8 @@ pub struct Snapshot {
 /// This trait is automatically implemented on user specified structs
 /// or otherwise manually implemented.
 pub trait Versionize {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W, version: u16);
-    fn deserialize<R: std::io::Read>(reader: &mut R, version: u16) -> Self;
+    fn serialize<W: std::io::Write>(&self, writer: &mut W, version_map: &VersionMap, app_version: u16);
+    fn deserialize<R: std::io::Read>(reader: &mut R, version_map: &VersionMap, app_version: u16) -> Self;
 
     // Returns struct name as string.
     fn name() -> String;
@@ -57,16 +62,20 @@ pub trait Versionize {
 
 impl Snapshot {
     //// Public API
-    pub fn new_in_memory() -> std::io::Result<Snapshot> {
+    pub fn new_in_memory(version_map: VersionMap) -> std::io::Result<Snapshot> {
         Ok(Snapshot {
+            hdr: SnapshotHdr::default(),
+            version_map,
             file: None,
             data: Vec::new(),
         })
     }
-    pub fn new(path: &Path) -> std::io::Result<Snapshot> {
+    pub fn new(path: &Path, version_map: VersionMap) -> std::io::Result<Snapshot> {
         let file = OpenOptions::new().create(true).write(true).open(path)?;
 
         Ok(Snapshot {
+            hdr: SnapshotHdr::default(),
+            version_map,
             file: Some(file),
             data: Vec::new(),
         })
@@ -102,15 +111,16 @@ impl Snapshot {
         Ok(())
     }
 
-    pub fn load_from_mem(mem: &mut [u8]) -> std::io::Result<Snapshot> {
+    pub fn load_from_mem(mem: &mut [u8], version_map: VersionMap) -> std::io::Result<Snapshot> {
         let mut snapshot = Snapshot {
+            hdr: bincode::deserialize(&mem).unwrap(),
+            version_map,
             file: None,
             data: Vec::new(),
         };
 
         // Load the snapshot header.
-        let hdr: SnapshotHdr = bincode::deserialize(&mem).unwrap();
-        let hdr_size = bincode::serialized_size(&hdr).unwrap() as usize;
+        let hdr_size = bincode::serialized_size(&snapshot.hdr).unwrap() as usize;
 
         // Store the bincode blob.
         snapshot.data = mem[hdr_size..].to_vec();
@@ -118,12 +128,12 @@ impl Snapshot {
         Ok(snapshot)
     }
 
-    pub fn load(path: &Path) -> std::io::Result<Snapshot> {
+    pub fn load(path: &Path, version_map: VersionMap) -> std::io::Result<Snapshot> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut slice = Vec::new();
         file.read_to_end(&mut slice)?;
 
-        Self::load_from_mem(&mut slice)
+        Self::load_from_mem(&mut slice, version_map)
     }
 
     pub fn deserialize<D>(&mut self) -> D
@@ -131,15 +141,15 @@ impl Snapshot {
         D: Versionize + 'static,
     {
         let mut slice = self.data.as_slice();
-        D::deserialize(&mut slice, 1)
+        // We always deserialize into latest version from the app version specified in the header.
+        D::deserialize(&mut slice, &self.version_map, self.hdr.data_version)
     }
 
-    pub fn serialize<S>(&mut self, version: u16, object: &S)
+    pub fn serialize<S>(&mut self, app_version: u16, object: &S)
     where
         S: Versionize + 'static,
     {
-        // self.data.resize(1024*1024*2, 0);
-        object.serialize(&mut self.data, version);
+        object.serialize(&mut self.data, &self.version_map, app_version);
     }
 }
 
@@ -147,11 +157,11 @@ macro_rules! primitive_versionize {
     ($ty:ident) => {
         impl Versionize for $ty {
             #[inline]
-            fn serialize<W: std::io::Write>(&self, writer: &mut W, _version: u16) {
+            fn serialize<W: std::io::Write>(&self, writer: &mut W, _version_map: &VersionMap, _version: u16) {
                 bincode::serialize_into(writer, &self).unwrap();
             }
             #[inline]
-            fn deserialize<R: std::io::Read>(mut reader: &mut R, _version: u16) -> Self {
+            fn deserialize<R: std::io::Read>(mut reader: &mut R, _version_map: &VersionMap, _version: u16) -> Self {
                 bincode::deserialize_from(&mut reader).unwrap()
             }
 
@@ -161,7 +171,7 @@ macro_rules! primitive_versionize {
             }
             // Not used.
             fn version() -> u16 {
-                0
+                1
             }
         }
     };
@@ -196,21 +206,21 @@ where
     T: Versionize,
 {
     #[inline]
-    fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version: u16) {
+    fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version_map: &VersionMap, app_version: u16) {
         // Serialize in the same fashion as bincode:
         // len, T, T, ...
         bincode::serialize_into(&mut writer, &self.len()).unwrap();
         for obj in self {
-            obj.serialize(writer, version);
+            obj.serialize(writer, version_map, app_version);
         }
     }
 
     #[inline]
-    fn deserialize<R: std::io::Read>(mut reader: &mut R, version: u16) -> Self {
+    fn deserialize<R: std::io::Read>(mut reader: &mut R, version_map: &VersionMap, app_version: u16) -> Self {
         let mut v = Vec::new();
         let len: u64 = bincode::deserialize_from(&mut reader).unwrap();
         for _ in 0..len {
-            let obj: T = T::deserialize(reader, version);
+            let obj: T = T::deserialize(reader, version_map, app_version);
             v.push(obj);
         }
         v
@@ -220,9 +230,10 @@ where
     fn name() -> String {
         String::new()
     }
+
     // Not used.
     fn version() -> u16 {
-        0
+        1
     }
 }
 
@@ -240,12 +251,12 @@ mod tests {
     use super::*;
 
     #[repr(u32)]
-    #[derive(Debug, Versionize, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Versionize, Serialize, Deserialize, PartialEq, Clone)]
     pub enum TestState {
         One = 1,
-        #[snapshot(start_version = 2, default_fn = "test_state_default_One")]
+        #[snapshot(start_version = 2, default_fn = "test_state_default_one")]
         Two = 2,
-        #[snapshot(start_version = 3, default_fn = "test_state_default_One")]
+        #[snapshot(start_version = 3, default_fn = "test_state_default_two")]
         Three = 3,
     }
 
@@ -255,12 +266,28 @@ mod tests {
         }
     }
 
-    fn test_state_default_One(input: &TestState, target_version: u16) -> TestState {
+    fn test_state_default_one(_input: &TestState, target_version: u16) -> TestState {
+        println!("test_state_default_one target version {}", target_version);
+
         match target_version {
             2 => {
-                TestState::One
+                TestState::Two
             }
-            a => {
+            _ => {
+                TestState::Two
+            }
+        }
+    }
+    fn test_state_default_two(_input: &TestState, target_version: u16) -> TestState {
+        println!("test_state_default_two target version {}", target_version);
+        match target_version {
+            3 => {
+                TestState::Three
+            }
+            2 => {
+                TestState::Two
+            }
+            _ => {
                 TestState::One
             }
         }
@@ -272,7 +299,7 @@ mod tests {
         pub regs: [::std::os::raw::c_char; 32],
     }
 
-    #[derive(Versionize, Debug, PartialEq)]
+    #[derive(Versionize, Debug, PartialEq, Clone)]
     pub struct MmioDeviceState {
         pub addr: u64,
         pub irq: u32,
@@ -285,17 +312,62 @@ mod tests {
         pub config_generation: u32,
         pub queues: Vec<u8>,
         pub lapics: Vec<kvm_lapic_state>,
+        pub test: TestState,
         #[snapshot(default = 128, start_version = 2)]
         pub flag: u8,
-        #[snapshot(start_version = 3)]
-        pub error: u64,
-        #[snapshot(start_version = 3)]
-        pub test: TestState,
+        // Default_fn is called when deserializing from a version that does not
+        // define this field.
+        #[snapshot(
+            start_version = 3, 
+            default_fn="default_error", 
+            semantic_ser_fn="serialize_error_semantic",
+            semantic_de_fn="deserialize_error_semantic"
+        )]
+        pub error: String,
+    }
+
+    fn serialize_error_semantic(input: &mut MmioDeviceState, target_version: u16) {
+        match target_version {
+            1..=2 => {
+                if input.error == "alabalaportocala" {
+                    input.irq = 1337;
+                } else {
+                    input.irq = 1984;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn deserialize_error_semantic(input: &mut MmioDeviceState, source_version: u16) {
+        match source_version {
+            1..=2 => {
+                if input.irq == 1337 {
+                    input.error = "alabalaportocala".to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+    fn default_error(_source_version: u16) -> String {
+        "alabalaportocala".to_owned()
     }
 
     #[test]
     fn test_save() {
-        let mut snapshot = Snapshot::new(Path::new("/tmp/snap.fcs")).unwrap();
+        // App v1 starts here. All structs/enums are at v1.
+        let mut vm = VersionMap::new();
+        // App v2 starts here,
+        vm.new_version()
+        .set_type_version(MmioDeviceState::name(), 2)
+        .set_type_version(TestState::name(), 2)
+        // App v3 starts here,
+        .new_version()
+        .set_type_version(MmioDeviceState::name(), 3)
+        .set_type_version(TestState::name(), 3);
+
+
+        let mut snapshot = Snapshot::new(Path::new("/tmp/snap.fcs"), vm.clone()).unwrap();
 
         let regs = [-5; 32usize];
         let lapic = kvm_lapic_state { regs };
@@ -313,19 +385,19 @@ mod tests {
             queues: vec![0; 64],
             lapics: Vec::new(),
             flag: 90,
-            error: 123,
-            test: TestState::Two
+            error: "ceva".to_owned(),
+            test: TestState::Three
         };
 
         state.lapics.push(lapic.clone());
         state.lapics.push(lapic.clone());
         state.lapics.push(lapic.clone());
 
-        snapshot.serialize(1, &state);
-        snapshot.save(1, "Testing".to_owned()).unwrap();
+        snapshot.serialize(2, &state);
+        snapshot.save(2, "Testing".to_owned()).unwrap();
 
         println!("Saved");
-        snapshot = Snapshot::load(Path::new("/tmp/snap.fcs")).unwrap();
+        snapshot = Snapshot::load(Path::new("/tmp/snap.fcs"), vm).unwrap();
 
         let x: MmioDeviceState = snapshot.deserialize();
 

@@ -50,16 +50,34 @@ struct EnumVariant {
 // Trait that defines a generic behaviour as a field level serialization and
 // deseriailization code generator
 trait FieldVersionize {
-    fn get_default(&self) -> Option<&syn::Lit>;
+    fn get_default(&self) -> Option<syn::Ident>;
+    fn get_semantic_ser(&self) -> Option<syn::Ident> { None }
+    fn get_semantic_de(&self) -> Option<syn::Ident> { None }
+
     fn get_attr(&self, attr: &str) -> Option<&syn::Lit>;
 
     fn generate_serializer(&self, target_version: u16) -> proc_macro2::TokenStream;
     fn generate_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream;
 
+    fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream;
+    fn generate_semantic_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream;
+
     fn get_start_version(&self) -> u16;
     fn get_end_version(&self) -> u16;
+
+    fn is_array(&self) -> bool { false }
 }
 
+fn get_ident_attr(attrs: &HashMap<String, syn::Lit>, attr_name: &str) -> Option<syn::Ident> {
+    attrs.get(attr_name).map(|default_fn| {
+        match default_fn {
+            syn::Lit::Str(lit_str) => {
+                return format_ident!("{}",lit_str.value());
+            },
+            _ => panic!("default_fn must be the function name as a String.")
+        }
+    })
+}
 fn parse_field_attributes(attrs: &mut HashMap<String, syn::Lit>, attributes: &Vec<syn::Attribute>) {
     for attribute in attributes {
         // Check if this is a snapshot attribute.
@@ -94,9 +112,18 @@ fn parse_field_attributes(attrs: &mut HashMap<String, syn::Lit>, attributes: &Ve
     }
 }
 
+
 impl FieldVersionize for StructField {
-    fn get_default(&self) -> Option<&syn::Lit> {
-        self.attrs.get("default")
+    fn get_default(&self) -> Option<syn::Ident> {
+        get_ident_attr(&self.attrs, "default_fn")
+    }
+
+    fn get_semantic_ser(&self) -> Option<syn::Ident> {
+        get_ident_attr(&self.attrs, "semantic_ser_fn")
+    }
+
+    fn get_semantic_de(&self) -> Option<syn::Ident> {
+        get_ident_attr(&self.attrs, "semantic_de_fn")
     }
 
     fn get_attr(&self, attr: &str) -> Option<&syn::Lit> {
@@ -108,6 +135,39 @@ impl FieldVersionize for StructField {
     }
     fn get_end_version(&self) -> u16 {
         self.end_version
+    }
+
+    fn is_array(&self) -> bool { 
+        match self.ty {
+            syn::Type::Array(_) => true,
+            _ => false
+        }
+    }
+
+    fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
+        // Generate semantic serializer for this field only if it does not exist in target_version.
+        if target_version < self.start_version || (self.end_version > 0 && target_version > self.end_version) {
+            if let Some(semantic_ser_fn) = self.get_semantic_ser() {
+                return quote! {
+                    #semantic_ser_fn(&mut copy_of_self, version);
+                }
+            }
+        }
+        quote!{}
+    }
+
+    // Semantic deserialization not supported for enums.
+    fn generate_semantic_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+        // Generate semantic deserializer for this field only if it does not exist in target_version.
+        if source_version < self.start_version || (self.end_version > 0 && source_version > self.end_version) {   
+            if let Some(semantic_de_fn) = self.get_semantic_de() {
+                return quote! {
+                    // Object is an instance of the structure.
+                    #semantic_de_fn(&mut object, version);
+                }
+            }
+        }
+        quote!{}
     }
 
     // Emits code that serializes this field.
@@ -123,10 +183,10 @@ impl FieldVersionize for StructField {
 
         match &self.ty {
             syn::Type::Array(_) => quote! {
-                Versionize::serialize(&self.#field_ident.to_vec(), writer, version);
+                Versionize::serialize(&copy_of_self.#field_ident.to_vec(), writer, version_map, app_version);
             },
             syn::Type::Path(_) => quote! {
-                Versionize::serialize(&self.#field_ident, writer, version);
+                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version);
             },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }
@@ -143,9 +203,10 @@ impl FieldVersionize for StructField {
         if source_version < self.start_version
             || (self.end_version > 0 && source_version > self.end_version)
         {
-            if let Some(default) = self.get_default() {
+            if let Some(default_fn) = self.get_default() {
                 return quote! {
-                    #field_ident: #default,
+                    // version is the source version of the struct.
+                    #field_ident: #default_fn(version),
                 };
             } else {
                 return quote! { #field_ident: Default::default(), };
@@ -183,7 +244,7 @@ impl FieldVersionize for StructField {
                 }
             }
             syn::Type::Path(_) => quote! {
-                #field_ident: <#ty as Versionize>::deserialize(&mut reader, version),
+                #field_ident: <#ty as Versionize>::deserialize(&mut reader, version_map, app_version),
             },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }
@@ -191,8 +252,8 @@ impl FieldVersionize for StructField {
 }
 
 impl FieldVersionize for EnumVariant {
-    fn get_default(&self) -> Option<&syn::Lit> {
-        self.attrs.get("default")
+    fn get_default(&self) -> Option<syn::Ident> {
+        get_ident_attr(&self.attrs, "default_fn")
     }
 
     fn get_attr(&self, attr: &str) -> Option<&syn::Lit> {
@@ -206,6 +267,16 @@ impl FieldVersionize for EnumVariant {
         self.end_version
     }
 
+    // Semantic serialization not supported for enums.
+    fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
+        quote!{}
+    }
+
+    // Semantic deserialization not supported for enums.
+    fn generate_semantic_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+        quote!{}
+    }
+
     // Emits code that serializes an enum variant.
     // The generated code is expected to be match branch.
     fn generate_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
@@ -214,18 +285,12 @@ impl FieldVersionize for EnumVariant {
 
         if target_version < self.start_version || (self.end_version > 0 && target_version > self.end_version)
         {
-            if let Some(default_fn) = self.get_attr("default_fn") {
-                match default_fn {
-                    syn::Lit::Str(lit_str) => {
-                        let fn_ident = format_ident!("{}",lit_str.value());
-                        return quote! {
-                            #field_ident => {
-                                let variant = #fn_ident(&self, #target_version);
-                                bincode::serialize_into(writer, &variant).unwrap();
-                            }
-                        }
+            if let Some(default_fn_ident) = self.get_default() {
+                return quote! {
+                    Self::#field_ident => {
+                        let variant = #default_fn_ident(&self, version);
+                        bincode::serialize_into(writer, &variant).unwrap();
                     },
-                    _ => panic!("Default_fn must be a string."),
                 }
             } else {
                 panic!("Variant {} does not exist in version {}, please implement a default_fn function that provides a default value for this variant.", field_ident.to_string(), target_version);
@@ -233,9 +298,10 @@ impl FieldVersionize for EnumVariant {
         }
 
         quote! {
-            #field_ident => {                
+            Self::#field_ident => {
+                println!("Serializing enum variant {:?}", self);               
                 bincode::serialize_into(writer, &self).unwrap();
-            }
+            },
         }
     }
 
@@ -398,15 +464,22 @@ impl DataDescriptor {
     // Returns a token stream containing the serializer body.
     fn generate_serializer(&self) -> proc_macro2::TokenStream {
         let mut versioned_serializers = proc_macro2::TokenStream::new();
+
         for i in 1..=self.version {
             let mut versioned_serializer = proc_macro2::TokenStream::new();
+            let mut semantic_serializer = proc_macro2::TokenStream::new();
+
+            // Emit code for both field serializer and semantic serializer.
             for field in &self.fields {
                 versioned_serializer.extend(field.generate_serializer(i));
+                semantic_serializer.extend(field.generate_semantic_serializer(i));
             }
 
             match self.kind {
+                // Serialization follows this flow: semantic -> field -> encode.
                 DescriptorKind::Struct => versioned_serializers.extend(quote! {
                     #i => {
+                        #semantic_serializer
                         #versioned_serializer
                     }
                 }),
@@ -423,54 +496,76 @@ impl DataDescriptor {
         }
 
         let result = quote! {
+            // Get the struct version for the input app_version.
+            let version = version_map.get_type_version(app_version, &Self::name());
+            // We will use this copy to perform semantic serialization.
+            let mut copy_of_self = self.clone();
             match version {
                 #versioned_serializers
-                _ => panic!("Unknown version {}.", version)
+                _ => panic!("Unknown {} version {}.", &Self::name(), version)
             }
         };
 
         result
     }
 
+    fn generate_deserializer_header(&self) -> proc_macro2::TokenStream {
+        // Just checking if there are any array fields present.
+        // If so, include the vec2array macro.
+        if let Some(_) = self.fields.iter().find(|&field| field.is_array()) {
+            return quote!{
+                use std::convert::TryInto;
+
+                // This macro will generate a function that copies a vec to an array.
+                // We serialize arrays as vecs.
+                macro_rules! vec_to_arr_func {
+                    ($name:ident, $type:ty, $size:expr) => {
+                        pub fn $name(data: std::vec::Vec<$type>) -> [$type; $size] {
+                            let mut arr = [0; $size];
+                            arr.copy_from_slice(&data[0..$size]);
+                            arr
+                        }
+                    };
+                }
+            }
+        }
+
+        quote!{}
+    }
     // Returns a token stream containing the serializer body.
     fn generate_deserializer(&self) -> proc_macro2::TokenStream {
         let mut versioned_deserializers = proc_macro2::TokenStream::new();
         let struct_ident = format_ident!("{}", self.ty);
+        let header = self.generate_deserializer_header();
 
         match self.kind { 
             DescriptorKind::Struct => {
                 for i in 1..=self.version {
                     let mut versioned_deserializer = proc_macro2::TokenStream::new();
+                    let mut semantic_deserializer = proc_macro2::TokenStream::new();
+
                     for field in &self.fields {
                         versioned_deserializer.extend(field.generate_deserializer(i));
+                        semantic_deserializer.extend(field.generate_semantic_deserializer(i));
                     }
                     versioned_deserializers.extend(quote! {
                         #i => {
-                            #struct_ident {
+                            let mut object = #struct_ident {
                                 #versioned_deserializer
-                            }
+                            };
+                            #semantic_deserializer
+                            object
                         }
                     });
                 }
         
                 quote! {
-                    use std::convert::TryInto;
+                    #header
 
-                    // This macro will generate a function that copies a vec to an array.
-                    // We serialize arrays as vecs.
-                    macro_rules! vec_to_arr_func {
-                        ($name:ident, $type:ty, $size:expr) => {
-                            pub fn $name(data: std::vec::Vec<$type>) -> [$type; $size] {
-                                let mut arr = [0; $size];
-                                arr.copy_from_slice(&data[0..$size]);
-                                arr
-                            }
-                        };
-                    }
-
+                    let version = version_map.get_type_version(app_version, &Self::name());
                     match version {
                         #versioned_deserializers
-                        _ => panic!("Unknown version {}.", version)
+                        _ => panic!("Unknown {} version {}.", Self::name(), version)
                     }
                 }
             },
@@ -498,12 +593,12 @@ pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
     let output = quote! {
         impl Versionize for #ident {
             #[inline]
-            fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version: u16) {
+            fn serialize<W: std::io::Write>(&self, writer: &mut W, version_map: &VersionMap, app_version: u16) {
                 #serializer
             }
 
             #[inline]
-            fn deserialize<R: std::io::Read>(mut reader: &mut R, version: u16) -> Self {
+            fn deserialize<R: std::io::Read>(mut reader: &mut R, version_map: &VersionMap, app_version: u16) -> Self {
                 #deserializer
             }
 
@@ -521,7 +616,11 @@ pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
         }
     };
 
-    println!("{}", output.to_string());
+    if descriptor.kind == DescriptorKind::Struct {
+        println!("{}", output.to_string());
+
+    }
+
 
     output.into()
 }
