@@ -188,6 +188,9 @@ impl FieldVersionize for StructField {
             syn::Type::Path(_) => quote! {
                 Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version);
             },
+            syn::Type::Reference(_) => quote! {
+                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version);
+            },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }
     }
@@ -246,6 +249,9 @@ impl FieldVersionize for StructField {
             syn::Type::Path(_) => quote! {
                 #field_ident: <#ty as Versionize>::deserialize(&mut reader, version_map, app_version),
             },
+            syn::Type::Reference(_) => quote! {
+                #field_ident: <#ty as Versionize>::deserialize(&mut reader, version_map, app_version),
+            },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }
     }
@@ -268,12 +274,12 @@ impl FieldVersionize for EnumVariant {
     }
 
     // Semantic serialization not supported for enums.
-    fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
+    fn generate_semantic_serializer(&self, _target_version: u16) -> proc_macro2::TokenStream {
         quote!{}
     }
 
     // Semantic deserialization not supported for enums.
-    fn generate_semantic_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+    fn generate_semantic_deserializer(&self, _source_version: u16) -> proc_macro2::TokenStream {
         quote!{}
     }
 
@@ -281,7 +287,6 @@ impl FieldVersionize for EnumVariant {
     // The generated code is expected to be match branch.
     fn generate_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
         let field_ident = &self.ident;
-        let discriminant = self.discriminant;
 
         if target_version < self.start_version || (self.end_version > 0 && target_version > self.end_version)
         {
@@ -299,7 +304,6 @@ impl FieldVersionize for EnumVariant {
 
         quote! {
             Self::#field_ident => {
-                println!("Serializing enum variant {:?}", self);               
                 bincode::serialize_into(writer, &self).unwrap();
             },
         }
@@ -616,10 +620,10 @@ pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
         }
     };
 
-    if descriptor.kind == DescriptorKind::Struct {
-        println!("{}", output.to_string());
+    // if descriptor.kind == DescriptorKind::Struct {
+    //     println!("{}", output.to_string());
 
-    }
+    // }
 
 
     output.into()

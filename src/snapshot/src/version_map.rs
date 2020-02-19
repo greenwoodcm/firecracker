@@ -30,16 +30,16 @@ impl VersionMap {
 
         for i in (0..version_space.len()).rev() {
             if let Some(version) = version_space[i].get(type_name) {
-                println!("Got {} @ {} for app {}", type_name, version, app_version );
+                // println!("Got {} @ {} for app {}", type_name, version, app_version );
                 return *version;
             }
         }
-        println!("Got {} @ {} for app {}", type_name, BASE_VERSION, app_version );
+        // println!("Got {} @ {} for app {}", type_name, BASE_VERSION, app_version );
 
         BASE_VERSION
     }
 
-    pub fn get_latest_gersion(&self) -> u16 {
+    pub fn get_latest_version(&self) -> u16 {
         return self.versions.len() as u16
     }
 
