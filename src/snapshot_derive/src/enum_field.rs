@@ -29,6 +29,10 @@ impl FieldVersionize for EnumVariant {
         self.end_version
     }
 
+    fn get_type(&self) -> syn::Type {
+        // Dummy type.
+        syn::Type::Verbatim(proc_macro2::TokenStream::new())
+    }
     // Semantic serialization not supported for enums.
     fn generate_semantic_serializer(&self, _target_version: u16) -> proc_macro2::TokenStream {
         quote!{}

@@ -3,7 +3,9 @@ use std::cmp::max;
 use syn::{DeriveInput};
 use struct_field::*;
 use enum_field::*;
+use union_field::*;
 use versionize::*;
+
 
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -35,15 +37,15 @@ impl DataDescriptor {
         match &derive_input.data {
             syn::Data::Struct(data_struct) => {
                 descriptor.kind = DescriptorKind::Struct;
-                descriptor.parse_fields(&data_struct.fields);
+                descriptor.parse_struct_fields(&data_struct.fields);
             }
             syn::Data::Enum(data_enum) => {
                 descriptor.kind = DescriptorKind::Enum;
-                descriptor.parse_variants(&data_enum.variants);
+                descriptor.parse_enum_variants(&data_enum.variants);
             }
             syn::Data::Union(data_union) => {
                 descriptor.kind = DescriptorKind::Union;
-                descriptor.parse_fields(&syn::Fields::Named(data_union.fields.clone()));
+                descriptor.parse_union_fields(&data_union.fields);
                 //println!("{:?}", data_union);
             }
         }
@@ -64,7 +66,7 @@ impl DataDescriptor {
 
     // Parses the struct field by field.
     // Returns a vector of Field definitions.
-    fn parse_fields(&mut self, fields: &syn::Fields) {
+    fn parse_struct_fields(&mut self, fields: &syn::Fields) {
         match fields {
             syn::Fields::Named(ref named_fields) => {
                 let pairs = named_fields.named.pairs();
@@ -76,9 +78,58 @@ impl DataDescriptor {
         }
     }
 
-    fn parse_variants(&mut self, variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>) {
+    fn parse_union_fields(&mut self, fields: &syn::FieldsNamed) {
+        let pairs = fields.named.pairs();
+        for field in pairs.into_iter() {
+            self.add_field(UnionField::new(self.version, field));
+        }
+    }
+
+    fn parse_enum_variants(&mut self, variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>) {
         for variant in variants.iter() {
             self.add_field(EnumVariant::new(self.version, variant));
+        }
+    }
+
+    fn generate_union_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
+        let mut target_version_fields = Vec::new();
+        let mut sizes = proc_macro2::TokenStream::new();
+        let mut matcher = proc_macro2::TokenStream::new();
+
+        let index = 0;
+        for field in &self.fields {
+            if target_version >= field.get_start_version() || (field.get_end_version() > 0 && target_version < field.get_end_version()) {
+                target_version_fields.push(field);
+            }
+
+            let field_ident = format_ident!("{}", field.get_name());
+            let field_serializer = field.generate_serializer(target_version);
+
+            // Now generate code that compares each size of the fields and selects the largest one.
+            sizes.extend(quote! {
+                std::mem::size_of(copy_of_self.#field_ident),
+            });
+
+            matcher.extend(quote! {
+                #index => #field_serializer,
+            });
+        }
+
+        quote!{ 
+            let size_vector = vec![#sizes];
+            let max:usize = 0;
+            let largest_field_index:usize = 0;
+            for i in 0..size_vector.len() {
+                if (size_vector[i] > max) {
+                    max = size_vector[i];
+                    largest_field_index = i;
+                }
+            }
+
+            match largest_field_index {
+                #matcher
+                _ => panic!("Cannot find largest union field index")
+            }
         }
     }
 
@@ -111,7 +162,16 @@ impl DataDescriptor {
                         }
                     }
                 }),
-                DescriptorKind::Union => panic!("DataDescriptor kind is Union."),
+                DescriptorKind::Union => {
+                    let union_serializer = self.generate_union_serializer(i);
+
+                    // We aim here to serialize the largest field in the structure only.
+                    versioned_serializers.extend(quote! {
+                        #i => {
+                            #union_serializer
+                        }
+                    });
+                },
                 DescriptorKind::None => panic!("DataDescriptor kind is None.")
             }
             
@@ -128,6 +188,9 @@ impl DataDescriptor {
             }
         };
 
+        if self.kind == DescriptorKind::Union {
+            println!("{:?}", result.to_string());
+        }
         result
     }
 
@@ -195,6 +258,14 @@ impl DataDescriptor {
                 quote! {
                     let variant: #struct_ident = bincode::deserialize_from(&mut reader).unwrap();
                     variant
+                }
+            },
+            DescriptorKind::Union => {
+                quote! {
+                    let version = version_map.get_type_version(app_version, &Self::name());
+                    match version {
+                        _ => panic!("Unions not implemented.")
+                    }
                 }
             },
             _ => panic!("Unsupported decriptor kind")

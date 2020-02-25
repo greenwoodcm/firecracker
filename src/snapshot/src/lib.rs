@@ -7,13 +7,14 @@ extern crate serde_json;
 extern crate snapshot_derive;
 
 pub mod version_map;
+pub mod primitives;
 
 use version_map::VersionMap;
 use serde_derive::{Deserialize, Serialize};
 use snapshot_derive::Versionize;
 use std::io::{Read, Write};
 use std::collections::hash_map::HashMap;
-
+use primitives::*;
 
 // 256k max section size.
 const SNAPSHOT_MAX_SECTION_SIZE: usize = 0x40000; 
@@ -41,24 +42,19 @@ fn build_magic_id(format_version: u16) -> u64{
     BASE_MAGIC_ID | format_version as u64
 }
 
-/// Firecracker snapshot format version 1.
+/// Firecracker snapshot format.
 ///  
 ///  |----------------------------|
 ///  |         SnapshotHdr        |
 ///  |----------------------------|
-///  |         Section hdr        |
+///  |         Section  #1        |
 ///  |----------------------------|
-///  |    Section Bincode blob    |
+///  |         Section  #2        |
 ///  |----------------------------|
-///  |         Section hdr        |
-///  |----------------------------|
-///  |    Section Bincode blob    |
+///  |         Section  #3        |
 ///  |----------------------------|
 ///             ..........
-/// The header contains snapshot format version, firecracker version
-/// and a description string.
-/// Each section contains a header and the bincode blob encodes
-/// one object.
+
 
 #[derive(Default, Debug, Versionize)]
 struct SnapshotHdr {
@@ -89,8 +85,8 @@ pub trait Versionize {
     fn serialize<W: Write>(&self, writer: &mut W, version_map: &VersionMap, target_app_version: u16);
     fn deserialize<R: Read>(reader: &mut R, version_map: &VersionMap, src_app_version: u16) -> Self;
 
-    // Returns struct names.
     fn name() -> String;
+    // Returns latest struct version.
     fn version() -> u16;
 }
 
@@ -185,88 +181,6 @@ impl Snapshot {
     }
 }
 
-macro_rules! primitive_versionize {
-    ($ty:ident) => {
-        impl Versionize for $ty {
-            #[inline]
-            fn serialize<W: std::io::Write>(&self, writer: &mut W, _version_map: &VersionMap, _version: u16) {
-                bincode::serialize_into(writer, &self).unwrap();
-            }
-            #[inline]
-            fn deserialize<R: std::io::Read>(mut reader: &mut R, _version_map: &VersionMap, _version: u16) -> Self {
-                bincode::deserialize_from(&mut reader).unwrap()
-            }
-
-            // Not used.
-            fn name() -> String {
-                String::new()
-            }
-            // Not used.
-            fn version() -> u16 {
-                1
-            }
-        }
-    };
-}
-
-primitive_versionize!(bool);
-primitive_versionize!(isize);
-primitive_versionize!(i8);
-primitive_versionize!(i16);
-primitive_versionize!(i32);
-primitive_versionize!(i64);
-primitive_versionize!(usize);
-primitive_versionize!(u8);
-primitive_versionize!(u16);
-primitive_versionize!(u32);
-primitive_versionize!(u64);
-primitive_versionize!(f32);
-primitive_versionize!(f64);
-primitive_versionize!(char);
-primitive_versionize!(String);
-// primitive_versionize!(Option<T>);
-
-#[cfg(feature = "std")]
-primitive_versionize!(CStr);
-#[cfg(feature = "std")]
-primitive_versionize!(CString);
-
-impl<T> Versionize for Vec<T>
-where
-    T: Versionize,
-{
-    #[inline]
-    fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version_map: &VersionMap, app_version: u16) {
-        // Serialize in the same fashion as bincode:
-        // len, T, T, ...
-        bincode::serialize_into(&mut writer, &self.len()).unwrap();
-        for obj in self {
-            obj.serialize(writer, version_map, app_version);
-        }
-    }
-
-    #[inline]
-    fn deserialize<R: std::io::Read>(mut reader: &mut R, version_map: &VersionMap, app_version: u16) -> Self {
-        let mut v = Vec::new();
-        let len: u64 = bincode::deserialize_from(&mut reader).unwrap();
-        for _ in 0..len {
-            let obj: T = T::deserialize(reader, version_map, app_version);
-            v.push(obj);
-        }
-        v
-    }
-
-    // Not used.
-    fn name() -> String {
-        String::new()
-    }
-
-    // Not used.
-    fn version() -> u16 {
-        1
-    }
-}
-
 #[inline]
 pub fn bench_restore_v1() {
     let mut snapshot_mem = std::fs::File::open("/tmp/snapshot.fcs").unwrap();
@@ -305,7 +219,6 @@ pub fn bench_restore_v1() {
             state.irq = 0;
         }    
     }
-
 }
 
 mod tests {
@@ -493,6 +406,36 @@ mod tests {
     //         Self::new()
     //     }
     // }
+
+    #[test]
+    fn test_basic() {
+        #[derive(Versionize, Debug, PartialEq, Clone)]
+        pub struct A {
+            x: u32,
+            y: String,
+        }
+    
+        #[derive(Versionize, Debug, PartialEq, Clone)]
+        pub struct B {
+           a: A,
+           b: u64,
+        }
+        let mut vm = VersionMap::new();
+
+        let state = B {
+            a: A {
+                x: 10,
+                y: "test".to_owned(),
+            },
+            b: 20
+        };
+
+        let mut snapshot_file = std::fs::File::create("/tmp/basic.bin").unwrap();
+        let mut snapshot = Snapshot::new(vm.clone()).unwrap();
+    
+        snapshot.write_section("test", vm.get_latest_version(), &state).unwrap();
+        snapshot.save(&mut snapshot_file, vm.get_latest_version()).unwrap();
+    }
 
 
     #[test]

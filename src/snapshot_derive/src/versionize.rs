@@ -18,4 +18,7 @@ pub(crate) trait FieldVersionize {
     fn get_end_version(&self) -> u16;
 
     fn is_array(&self) -> bool { false }
+    fn get_type(&self) -> syn::Type;
+    fn get_name(&self) -> String { String::new() }
+
 }

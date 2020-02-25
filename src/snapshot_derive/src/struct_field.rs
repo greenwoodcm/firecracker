@@ -43,6 +43,10 @@ impl FieldVersionize for StructField {
         }
     }
 
+    fn get_type(&self) -> syn::Type {
+        self.ty.clone()
+    }
+
     fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
         // Generate semantic serializer for this field only if it does not exist in target_version.
         if target_version < self.start_version || (self.end_version > 0 && target_version > self.end_version) {
