@@ -1,10 +1,13 @@
-
 // Trait that defines a generic behaviour as a field level serialization and
 // deseriailization code generator
 pub(crate) trait FieldVersionize {
     fn get_default(&self) -> Option<syn::Ident>;
-    fn get_semantic_ser(&self) -> Option<syn::Ident> { None }
-    fn get_semantic_de(&self) -> Option<syn::Ident> { None }
+    fn get_semantic_ser(&self) -> Option<syn::Ident> {
+        None
+    }
+    fn get_semantic_de(&self) -> Option<syn::Ident> {
+        None
+    }
 
     fn get_attr(&self, attr: &str) -> Option<&syn::Lit>;
 
@@ -17,8 +20,11 @@ pub(crate) trait FieldVersionize {
     fn get_start_version(&self) -> u16;
     fn get_end_version(&self) -> u16;
 
-    fn is_array(&self) -> bool { false }
+    fn is_array(&self) -> bool {
+        false
+    }
     fn get_type(&self) -> syn::Type;
-    fn get_name(&self) -> String { String::new() }
-
+    fn get_name(&self) -> String {
+        String::new()
+    }
 }

@@ -1,7 +1,7 @@
+use common::*;
 use quote::{format_ident, quote};
 use std::collections::hash_map::HashMap;
 use versionize::*;
-use common::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct StructField {
@@ -36,10 +36,10 @@ impl FieldVersionize for StructField {
         self.end_version
     }
 
-    fn is_array(&self) -> bool { 
+    fn is_array(&self) -> bool {
         match self.ty {
             syn::Type::Array(_) => true,
-            _ => false
+            _ => false,
         }
     }
 
@@ -49,28 +49,32 @@ impl FieldVersionize for StructField {
 
     fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
         // Generate semantic serializer for this field only if it does not exist in target_version.
-        if target_version < self.start_version || (self.end_version > 0 && target_version > self.end_version) {
+        if target_version < self.start_version
+            || (self.end_version > 0 && target_version > self.end_version)
+        {
             if let Some(semantic_ser_fn) = self.get_semantic_ser() {
                 return quote! {
                     #semantic_ser_fn(&mut copy_of_self, version);
-                }
+                };
             }
         }
-        quote!{}
+        quote! {}
     }
 
     // !! Semantic deserialization not supported for enums.
     fn generate_semantic_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
         // Generate semantic deserializer for this field only if it does not exist in target_version.
-        if source_version < self.start_version || (self.end_version > 0 && source_version > self.end_version) {   
+        if source_version < self.start_version
+            || (self.end_version > 0 && source_version > self.end_version)
+        {
             if let Some(semantic_de_fn) = self.get_semantic_de() {
                 return quote! {
                     // Object is an instance of the structure.
                     #semantic_de_fn(&mut object, version);
-                }
+                };
             }
         }
-        quote!{}
+        quote! {}
     }
 
     // Emits code that serializes this field.
@@ -99,10 +103,7 @@ impl FieldVersionize for StructField {
     }
 
     // Emits code that deserializes this field.
-    fn generate_deserializer(
-        &self,
-        source_version: u16,
-    ) -> proc_macro2::TokenStream {
+    fn generate_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
         let field_ident = format_ident!("{}", self.name);
 
         // If the field does not exist in source version, use default annotation or Default trait.

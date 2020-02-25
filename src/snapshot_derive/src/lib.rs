@@ -7,17 +7,17 @@ extern crate proc_macro2;
 extern crate quote;
 extern crate syn;
 
-mod descriptor;
-mod versionize;
-mod struct_field;
-mod enum_field;
 mod common;
+mod descriptor;
+mod enum_field;
+mod struct_field;
 mod union_field;
+mod versionize;
 
+use descriptor::*;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
-use descriptor::*;
 
 #[proc_macro_derive(Versionize, attributes(snapshot))]
 pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {

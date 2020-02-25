@@ -1,12 +1,10 @@
+use enum_field::*;
 use quote::{format_ident, quote};
 use std::cmp::max;
-use syn::{DeriveInput};
 use struct_field::*;
-use enum_field::*;
+use syn::DeriveInput;
 use union_field::*;
 use versionize::*;
-
-
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) enum DescriptorKind {
@@ -85,7 +83,10 @@ impl DataDescriptor {
         }
     }
 
-    fn parse_enum_variants(&mut self, variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>) {
+    fn parse_enum_variants(
+        &mut self,
+        variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
+    ) {
         for variant in variants.iter() {
             self.add_field(EnumVariant::new(self.version, variant));
         }
@@ -98,7 +99,9 @@ impl DataDescriptor {
 
         let index = 0;
         for field in &self.fields {
-            if target_version >= field.get_start_version() || (field.get_end_version() > 0 && target_version < field.get_end_version()) {
+            if target_version >= field.get_start_version()
+                || (field.get_end_version() > 0 && target_version < field.get_end_version())
+            {
                 target_version_fields.push(field);
             }
 
@@ -115,7 +118,7 @@ impl DataDescriptor {
             });
         }
 
-        quote!{ 
+        quote! {
             let size_vector = vec![#sizes];
             let max:usize = 0;
             let largest_field_index:usize = 0;
@@ -171,10 +174,9 @@ impl DataDescriptor {
                             #union_serializer
                         }
                     });
-                },
-                DescriptorKind::None => panic!("DataDescriptor kind is None.")
+                }
+                DescriptorKind::None => panic!("DataDescriptor kind is None."),
             }
-            
         }
 
         let result = quote! {
@@ -198,7 +200,7 @@ impl DataDescriptor {
         // Just checking if there are any array fields present.
         // If so, include the vec2array macro.
         if let Some(_) = self.fields.iter().find(|&field| field.is_array()) {
-            return quote!{
+            return quote! {
                 use std::convert::TryInto;
 
                 // This macro will generate a function that copies a vec to an array.
@@ -212,10 +214,10 @@ impl DataDescriptor {
                         }
                     };
                 }
-            }
+            };
         }
 
-        quote!{}
+        quote! {}
     }
     // Returns a token stream containing the serializer body.
     pub fn generate_deserializer(&self) -> proc_macro2::TokenStream {
@@ -223,7 +225,7 @@ impl DataDescriptor {
         let struct_ident = format_ident!("{}", self.ty);
         let header = self.generate_deserializer_header();
 
-        match self.kind { 
+        match self.kind {
             DescriptorKind::Struct => {
                 for i in 1..=self.version {
                     let mut versioned_deserializer = proc_macro2::TokenStream::new();
@@ -243,7 +245,7 @@ impl DataDescriptor {
                         }
                     });
                 }
-        
+
                 quote! {
                     #header
 
@@ -253,13 +255,13 @@ impl DataDescriptor {
                         _ => panic!("Unknown {} version {}.", Self::name(), version)
                     }
                 }
-            },
+            }
             DescriptorKind::Enum => {
                 quote! {
                     let variant: #struct_ident = bincode::deserialize_from(&mut reader).unwrap();
                     variant
                 }
-            },
+            }
             DescriptorKind::Union => {
                 quote! {
                     let version = version_map.get_type_version(app_version, &Self::name());
@@ -267,8 +269,8 @@ impl DataDescriptor {
                         _ => panic!("Unions not implemented.")
                     }
                 }
-            },
-            _ => panic!("Unsupported decriptor kind")
+            }
+            _ => panic!("Unsupported decriptor kind"),
         }
     }
 }

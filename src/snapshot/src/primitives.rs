@@ -1,16 +1,23 @@
-
-use self::super::{Versionize, VersionMap};
-
+use self::super::{VersionMap, Versionize};
 
 macro_rules! primitive_versionize {
     ($ty:ident) => {
         impl Versionize for $ty {
             #[inline]
-            fn serialize<W: std::io::Write>(&self, writer: &mut W, _version_map: &VersionMap, _version: u16) {
+            fn serialize<W: std::io::Write>(
+                &self,
+                writer: &mut W,
+                _version_map: &VersionMap,
+                _version: u16,
+            ) {
                 bincode::serialize_into(writer, &self).unwrap();
             }
             #[inline]
-            fn deserialize<R: std::io::Read>(mut reader: &mut R, _version_map: &VersionMap, _version: u16) -> Self {
+            fn deserialize<R: std::io::Read>(
+                mut reader: &mut R,
+                _version_map: &VersionMap,
+                _version: u16,
+            ) -> Self {
                 bincode::deserialize_from(&mut reader).unwrap()
             }
 
@@ -53,7 +60,12 @@ where
     T: Versionize,
 {
     #[inline]
-    fn serialize<W: std::io::Write>(&self, mut writer: &mut W, version_map: &VersionMap, app_version: u16) {
+    fn serialize<W: std::io::Write>(
+        &self,
+        mut writer: &mut W,
+        version_map: &VersionMap,
+        app_version: u16,
+    ) {
         // Serialize in the same fashion as bincode:
         // len, T, T, ...
         bincode::serialize_into(&mut writer, &self.len()).unwrap();
@@ -63,7 +75,11 @@ where
     }
 
     #[inline]
-    fn deserialize<R: std::io::Read>(mut reader: &mut R, version_map: &VersionMap, app_version: u16) -> Self {
+    fn deserialize<R: std::io::Read>(
+        mut reader: &mut R,
+        version_map: &VersionMap,
+        app_version: u16,
+    ) -> Self {
         let mut v = Vec::new();
         let len: u64 = bincode::deserialize_from(&mut reader).unwrap();
         for _ in 0..len {

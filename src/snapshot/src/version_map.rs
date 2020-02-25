@@ -10,7 +10,7 @@ pub struct VersionMap {
 impl VersionMap {
     pub fn new() -> Self {
         VersionMap {
-            versions: vec![HashMap::new(); 1]
+            versions: vec![HashMap::new(); 1],
         }
     }
 
@@ -40,7 +40,6 @@ impl VersionMap {
     }
 
     pub fn get_latest_version(&self) -> u16 {
-        return self.versions.len() as u16
+        return self.versions.len() as u16;
     }
-
 }

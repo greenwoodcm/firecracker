@@ -1,20 +1,22 @@
-
-use std::collections::hash_map::HashMap;
 use quote::format_ident;
+use std::collections::hash_map::HashMap;
 
-
-pub(crate) fn get_ident_attr(attrs: &HashMap<String, syn::Lit>, attr_name: &str) -> Option<syn::Ident> {
-    attrs.get(attr_name).map(|default_fn| {
-        match default_fn {
-            syn::Lit::Str(lit_str) => {
-                return format_ident!("{}",lit_str.value());
-            },
-            _ => panic!("default_fn must be the function name as a String.")
+pub(crate) fn get_ident_attr(
+    attrs: &HashMap<String, syn::Lit>,
+    attr_name: &str,
+) -> Option<syn::Ident> {
+    attrs.get(attr_name).map(|default_fn| match default_fn {
+        syn::Lit::Str(lit_str) => {
+            return format_ident!("{}", lit_str.value());
         }
+        _ => panic!("default_fn must be the function name as a String."),
     })
 }
 
-pub(crate) fn parse_field_attributes(attrs: &mut HashMap<String, syn::Lit>, attributes: &Vec<syn::Attribute>) {
+pub(crate) fn parse_field_attributes(
+    attrs: &mut HashMap<String, syn::Lit>,
+    attributes: &Vec<syn::Attribute>,
+) {
     for attribute in attributes {
         // Check if this is a snapshot attribute.
         match attribute.parse_meta().unwrap().clone() {
