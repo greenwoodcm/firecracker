@@ -5,6 +5,7 @@ extern crate serde;
 extern crate serde_derive;
 extern crate serde_json;
 extern crate snapshot_derive;
+extern crate kvm_bindings;
 
 pub mod primitives;
 pub mod version_map;
@@ -67,6 +68,8 @@ pub struct Snapshot {
     format_version: u16,
     version_map: VersionMap,
     sections: HashMap<String, Section>,
+    // Required for serialization.
+    target_version: u16,
 }
 
 #[derive(Default, Debug, Versionize)]
@@ -95,12 +98,13 @@ pub trait Versionize {
 }
 
 impl Snapshot {
-    pub fn new(version_map: VersionMap) -> std::io::Result<Snapshot> {
+    pub fn new(version_map: VersionMap, target_version: u16) -> std::io::Result<Snapshot> {
         Ok(Snapshot {
             version_map,
             hdr: SnapshotHdr::default(),
             format_version: SNAPSHOT_FORMAT_VERSION,
             sections: HashMap::new(),
+            target_version,
         })
     }
 
@@ -126,15 +130,17 @@ impl Snapshot {
             hdr,
             format_version,
             sections,
+            // Not used when loading a snapshot.
+            target_version: 0,
         })
     }
 
-    pub fn save<T>(&mut self, mut writer: &mut T, target_app_version: u16) -> std::io::Result<()>
+    pub fn save<T>(&mut self, mut writer: &mut T) -> std::io::Result<()>
     where
         T: std::io::Write,
     {
         self.hdr = SnapshotHdr {
-            data_version: target_app_version,
+            data_version: self.target_version,
             section_count: self.sections.len() as u16,
         };
 
@@ -179,12 +185,7 @@ impl Snapshot {
         Ok(None)
     }
 
-    fn write_section<T>(
-        &mut self,
-        name: &str,
-        target_app_version: u16,
-        object: &T,
-    ) -> std::io::Result<()>
+    fn write_section<T>(&mut self, name: &str, object: &T) -> std::io::Result<()>
     where
         T: Versionize + 'static,
     {
@@ -194,7 +195,7 @@ impl Snapshot {
         };
 
         let slice = &mut new_section.data.as_mut_slice();
-        object.serialize(slice, &self.version_map, target_app_version);
+        object.serialize(slice, &self.version_map, self.target_version);
         // Resize vec to serialized section len.
         let serialized_len =
             slice.as_ptr() as usize - new_section.data.as_slice().as_ptr() as usize;
@@ -256,8 +257,19 @@ pub fn bench_restore_v1() {
 }
 
 mod tests {
+    #![allow(non_upper_case_globals)]
+    #![allow(non_camel_case_types)]
+    #![allow(non_snake_case)]
     use super::*;
     use std::io::{Seek, SeekFrom};
+    pub type __s8 = ::std::os::raw::c_schar;
+    pub type __u8 = ::std::os::raw::c_uchar;
+    pub type __s16 = ::std::os::raw::c_short;
+    pub type __u16 = ::std::os::raw::c_ushort;
+    pub type __s32 = ::std::os::raw::c_int;
+    pub type __u32 = ::std::os::raw::c_uint;
+    pub type __s64 = ::std::os::raw::c_longlong;
+    pub type __u64 = ::std::os::raw::c_ulonglong;
 
     #[repr(u32)]
     #[derive(Debug, Versionize, Serialize, Deserialize, PartialEq, Clone)]
@@ -362,11 +374,185 @@ mod tests {
     }
 
     #[test]
-    fn test_basic() {
+    fn test_struct_default_fn() {
+        #[derive(Versionize, Clone, Default)]
+        struct Test1 {
+            field1: u32,
+        };
+
+        #[derive(Versionize, Clone, Default)]
+        struct Test {
+            field1: u32,
+            #[snapshot(start_version=2, default_fn="field2_default")]
+            field2: u64,
+            #[snapshot(start_version=3, default_fn="field3_default")]
+            field3: String,
+            #[snapshot(start_version=4, default_fn="field4_default")]
+            field4: Vec<u64>
+        }
+        fn field2_default(_: u16) -> u64 {
+            20
+        }
+        fn field3_default(_: u16) -> String {
+            "default".to_owned()
+        }
+        fn field4_default(_: u16) -> Vec<u64> {
+            vec![1,2,3,4]
+        }
+
+        let mut vm = VersionMap::new();
+        vm.new_version()
+        .set_type_version(Test::name(), 2)
+        .new_version()
+        .set_type_version(Test::name(), 3)
+        .new_version()
+        .set_type_version(Test::name(), 4);
+        let state = Test {
+            field1: 1,
+            field2: 2,
+            field3: "test".to_owned(),
+            field4: vec![4,3,2,1],
+        };
+
+        let state_1 = Test1 {
+            field1: 1,
+        };
+
+        let mut snapshot_mem = vec![0u8; 1024];
+        
+        // Serialize as v1.
+        let mut snapshot = Snapshot::new(vm.clone(), 1).unwrap();
+        snapshot.write_section("test", &state_1).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        let restored_state: Test= snapshot.read_section::<Test>("test").unwrap().unwrap();
+        assert_eq!(restored_state.field1, state_1.field1);
+        assert_eq!(restored_state.field2, 20);
+        assert_eq!(restored_state.field3, "default");
+        assert_eq!(restored_state.field4, vec![1,2,3,4]);
+
+        // Serialize as v2.
+        let mut snapshot = Snapshot::new(vm.clone(), 2).unwrap();
+        snapshot.write_section("test", &state).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        let restored_state: Test= snapshot.read_section::<Test>("test").unwrap().unwrap();
+        assert_eq!(restored_state.field1, state.field1);
+        assert_eq!(restored_state.field2, 2);
+        assert_eq!(restored_state.field3, "default");
+        assert_eq!(restored_state.field4, vec![1,2,3,4]);
+        
+        // Serialize as v3.
+        let mut snapshot = Snapshot::new(vm.clone(), 3).unwrap();
+        snapshot.write_section("test", &state).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        let restored_state: Test= snapshot.read_section::<Test>("test").unwrap().unwrap();
+        assert_eq!(restored_state.field1, state.field1);
+        assert_eq!(restored_state.field2, 2);
+        assert_eq!(restored_state.field3, "test");
+        assert_eq!(restored_state.field4, vec![1,2,3,4]);
+
+         // Serialize as v4.
+         let mut snapshot = Snapshot::new(vm.clone(), 4).unwrap();
+         snapshot.write_section("test", &state).unwrap();
+         snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+ 
+         snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+         let restored_state: Test= snapshot.read_section::<Test>("test").unwrap().unwrap();
+         assert_eq!(restored_state.field1, state.field1);
+         assert_eq!(restored_state.field2, 2);
+         assert_eq!(restored_state.field3, "test");
+         assert_eq!(restored_state.field4, vec![4,3,2,1]);
+    }
+
+    #[test]
+    fn test_union_version() {
+        #[repr(C)]
+        #[derive(Versionize, Copy, Clone)]
+        union kvm_irq_level__bindgen_ty_1 {
+            pub irq: __u32,
+            pub status: __s32,
+
+            #[snapshot(start_version=1, end_version=1)]
+            _bindgen_union_align: u32,
+
+            #[snapshot(start_version=2)]
+            pub extended_status: __s64,
+
+            #[snapshot(start_version=2)]
+            _bindgen_union_align_2: [u64; 4usize],
+        }
+
+        impl Default for kvm_irq_level__bindgen_ty_1 {
+            fn default() -> Self {
+                unsafe { ::std::mem::zeroed() }
+            }
+        }
+
+        let mut state = kvm_irq_level__bindgen_ty_1::default();
+        unsafe { 
+            state.extended_status = 0x1234_5678_8765_4321;
+        }
+
+        let vm = VersionMap::new();
+        let mut snapshot_mem = vec![0u8; 1024 * 2];
+        // Serialize as v1.
+        let mut snapshot = Snapshot::new(vm.clone(), 1).unwrap();
+        snapshot.write_section("test", &state).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        let restored_state = snapshot.read_section::<kvm_irq_level__bindgen_ty_1>("test").unwrap().unwrap();
+        unsafe { 
+            assert_eq!(restored_state.irq, 0x8765_4321);
+        }
+    }
+    #[test]
+    fn test_kvm_bindings_struct() {
+        #[repr(C)]
+        #[derive(Versionize, Debug, Default, Copy, Clone, PartialEq)]
+        pub struct kvm_pit_config {
+            pub flags: __u32,
+            pub pad: [__u32; 15usize],
+        }
+
+        let state = kvm_pit_config {
+            flags: 123456,
+            pad: [0; 15usize]
+        };
+
+        let vm = VersionMap::new();
+        let mut snapshot_mem = vec![0u8; 1024 * 2];
+        // Serialize as v1.
+        let mut snapshot = Snapshot::new(vm.clone(), 1).unwrap();
+        snapshot.write_section("test", &state).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        let restored_state = snapshot.read_section::<kvm_pit_config>("test").unwrap().unwrap();
+        println!("State: {:?}", restored_state);
+        // Check if we serialized x correctly, that is if semantic_x() was called.
+        assert_eq!(restored_state, state);
+    }
+
+    #[test]
+    fn test_basic_add_remove_field() {
         #[derive(Versionize, Debug, PartialEq, Clone)]
         pub struct A {
+            #[snapshot(start_version = 1, end_version = 1)]
             x: u32,
             y: String,
+            #[snapshot(start_version = 2, default_fn = "default_A_z")]
+            z: String,
+            #[snapshot(
+                start_version = 3,
+                semantic_ser_fn="semantic_x"
+            )]
+            q: u64,
         }
 
         #[derive(Versionize, Debug, PartialEq, Clone)]
@@ -374,30 +560,71 @@ mod tests {
             a: A,
             b: u64,
         }
-        let vm = VersionMap::new();
+
+        fn default_A_z(source_version: u16) -> String {
+            "whatever".to_owned()
+        }
+     
+        fn semantic_x(input: &mut A, target_version: u16) {
+            input.x = input.q as u32;
+        }
+
+        let mut vm = VersionMap::new();
+        vm.new_version()
+            .set_type_version(A::name(), 2)
+            .new_version()
+            .set_type_version(A::name(), 3);
 
         let state = B {
             a: A {
-                x: 10,
+                x: 0,
                 y: "test".to_owned(),
+                z: "basic".to_owned(),
+                q: 1234,
             },
             b: 20,
         };
 
         let mut snapshot_mem = vec![0u8; 1024 * 2];
-        let mut snapshot = Snapshot::new(vm.clone()).unwrap();
 
-        snapshot
-            .write_section("test", vm.get_latest_version(), &state)
-            .unwrap();
-        snapshot
-            .save(&mut snapshot_mem.as_mut_slice(), vm.get_latest_version())
-            .unwrap();
+        // Serialize as v1.
+        let mut snapshot = Snapshot::new(vm.clone(), 1).unwrap();
+        snapshot.write_section("test", &state).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
 
-        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm).unwrap();
-
-        let restored_state = snapshot.read_section::<B>("test").unwrap().unwrap();
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        let mut restored_state = snapshot.read_section::<B>("test").unwrap().unwrap();
         println!("State: {:?}", restored_state);
+        // Check if we serialized x correctly, that is if semantic_x() was called.
+        assert_eq!(restored_state.a.x, 1234);
+        assert_eq!(restored_state.a.z, stringify!(whatever));
+
+        // Serialize as v2.
+        snapshot = Snapshot::new(vm.clone(), 2).unwrap();
+        snapshot.write_section("test", &state).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        restored_state = snapshot.read_section::<B>("test").unwrap().unwrap();
+        println!("State: {:?}", restored_state);
+        // Check if x was not serialized, it should be 0.
+        assert_eq!(restored_state.a.x, 0);
+        // z field was added in version to, make sure it contains the original value
+        assert_eq!(restored_state.a.z, stringify!(basic));
+
+        // Serialize as v3.
+        snapshot = Snapshot::new(vm.clone(), 3).unwrap();
+        snapshot.write_section("test", &state).unwrap();
+        snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap();
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        restored_state = snapshot.read_section::<B>("test").unwrap().unwrap();
+        println!("State: {:?}", restored_state);
+        // Check if x was not serialized, it should be 0.
+        assert_eq!(restored_state.a.x, 0);
+        // z field was added in version to, make sure it contains the original value
+        assert_eq!(restored_state.a.z, stringify!(basic));
+        assert_eq!(restored_state.a.q, 1234);
     }
 
     #[test]
@@ -422,7 +649,8 @@ mod tests {
             .open("/tmp/snapshot.fcs")
             .unwrap();
 
-        let mut snapshot = Snapshot::new(vm.clone()).unwrap();
+        let target_app_version = 1;
+        let mut snapshot = Snapshot::new(vm.clone(), target_app_version).unwrap();
 
         let regs = [-5; 32usize];
         let lapic = kvm_lapic_state { regs };
@@ -449,23 +677,15 @@ mod tests {
         state.lapics.push(lapic.clone());
         state.lapics.push(lapic.clone());
 
-        let target_app_version = 1;
-
-        snapshot
-            .write_section("first", target_app_version, &state)
-            .unwrap();
+        snapshot.write_section("first", &state).unwrap();
         let mut state2 = state.clone();
         state2.addr = 5678;
         state2.test = TestState::One;
 
-        snapshot
-            .write_section("second", target_app_version, &state2)
-            .unwrap();
-        snapshot
-            .write_section("lapic", target_app_version, &lapic)
-            .unwrap();
+        snapshot.write_section("second", &state2).unwrap();
+        snapshot.write_section("lapic", &lapic).unwrap();
 
-        let _ = snapshot.save(&mut snapshot_mem, target_app_version);
+        let _ = snapshot.save(&mut snapshot_mem);
 
         println!("Saved");
 

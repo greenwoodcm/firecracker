@@ -93,35 +93,33 @@ impl DataDescriptor {
     }
 
     fn generate_union_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
-        let mut target_version_fields = Vec::new();
         let mut sizes = proc_macro2::TokenStream::new();
         let mut matcher = proc_macro2::TokenStream::new();
 
-        let index = 0;
+        let mut index: usize = 0;
         for field in &self.fields {
             if target_version >= field.get_start_version()
-                || (field.get_end_version() > 0 && target_version < field.get_end_version())
+                || (field.get_end_version() > 0 && target_version <= field.get_end_version())
             {
-                target_version_fields.push(field);
+                let field_type = field.get_type();
+                let field_serializer = field.generate_serializer(target_version);
+
+                // Now generate code that compares each size of the fields and selects the largest one.
+                sizes.extend(quote! {
+                    std::mem::size_of::<#field_type> as usize,
+                });
+
+                matcher.extend(quote! {
+                    #index => #field_serializer,
+                });
+                index+=1;
             }
-
-            let field_ident = format_ident!("{}", field.get_name());
-            let field_serializer = field.generate_serializer(target_version);
-
-            // Now generate code that compares each size of the fields and selects the largest one.
-            sizes.extend(quote! {
-                std::mem::size_of(copy_of_self.#field_ident),
-            });
-
-            matcher.extend(quote! {
-                #index => #field_serializer,
-            });
         }
 
         quote! {
             let size_vector = vec![#sizes];
-            let max:usize = 0;
-            let largest_field_index:usize = 0;
+            let mut max: usize = 0;
+            let mut largest_field_index: usize = 0;
             for i in 0..size_vector.len() {
                 if (size_vector[i] > max) {
                     max = size_vector[i];
@@ -136,6 +134,47 @@ impl DataDescriptor {
         }
     }
 
+    fn generate_union_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+        let mut sizes = proc_macro2::TokenStream::new();
+        let mut matcher = proc_macro2::TokenStream::new();
+
+        let mut index: usize = 0;
+        for field in &self.fields {
+            if source_version >= field.get_start_version()
+                || (field.get_end_version() > 0 && source_version <= field.get_end_version())
+            {
+                let field_type = field.get_type();
+                let field_deserializer = field.generate_deserializer(source_version);
+
+                // Now generate code that compares each size of the fields and selects the largest one.
+                sizes.extend(quote! {
+                    std::mem::size_of::<#field_type> as usize,
+                });
+
+                matcher.extend(quote! {
+                    #index => #field_deserializer,
+                });
+                index+=1;
+            }
+        }
+
+        quote! {
+            let size_vector = vec![#sizes];
+            let mut max: usize = 0;
+            let mut largest_field_index: usize = 0;
+            for i in 0..size_vector.len() {
+                if (size_vector[i] > max) {
+                    max = size_vector[i];
+                    largest_field_index = i;
+                }
+            }
+
+            match largest_field_index {
+                #matcher
+                _ => panic!("Cannot find largest union field index")
+            }
+        }
+    }
     // Returns a token stream containing the serializer body.
     pub fn generate_serializer(&self) -> proc_macro2::TokenStream {
         let mut versioned_serializers = proc_macro2::TokenStream::new();
@@ -190,9 +229,6 @@ impl DataDescriptor {
             }
         };
 
-        if self.kind == DescriptorKind::Union {
-            println!("{:?}", result.to_string());
-        }
         result
     }
 
@@ -263,10 +299,27 @@ impl DataDescriptor {
                 }
             }
             DescriptorKind::Union => {
+                for i in 1..=self.version {
+                    let mut versioned_deserializer = proc_macro2::TokenStream::new();
+
+                    let union_serializer = self.generate_union_deserializer(i);
+
+                    versioned_deserializers.extend(quote! {
+                        #i => {
+                            let mut object = Self::default();
+                            #union_serializer
+                            object
+                        }
+                    });
+                }
+
                 quote! {
+                    #header
+
                     let version = version_map.get_type_version(app_version, &Self::name());
                     match version {
-                        _ => panic!("Unions not implemented.")
+                        #versioned_deserializers
+                        _ => panic!("Unknown {} version {}.", Self::name(), version)
                     }
                 }
             }

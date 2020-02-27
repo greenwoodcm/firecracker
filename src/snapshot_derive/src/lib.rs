@@ -22,6 +22,7 @@ use syn::{parse_macro_input, DeriveInput};
 #[proc_macro_derive(Versionize, attributes(snapshot))]
 pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let generics = input.generics.clone();
     let descriptor = DataDescriptor::new(&input);
     let ident = &descriptor.ty;
     let name = descriptor.ty.to_string();
@@ -30,7 +31,7 @@ pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
     let deserializer = descriptor.generate_deserializer();
 
     let output = quote! {
-        impl Versionize for #ident {
+        impl Versionize for #ident #generics {
             #[inline]
             fn serialize<W: std::io::Write>(&self, writer: &mut W, version_map: &VersionMap, app_version: u16) {
                 #serializer
@@ -55,10 +56,10 @@ pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
         }
     };
 
-    // if descriptor.kind == DescriptorKind::Struct {
+    // if descriptor.ty == "kvm_irq_level__bindgen_ty_1" {
     //     println!("{}", output.to_string());
 
     // }
-
+    println!("{}", output.to_string());
     output.into()
 }

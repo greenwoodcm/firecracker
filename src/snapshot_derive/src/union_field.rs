@@ -93,18 +93,60 @@ impl FieldVersionize for UnionField {
         let field_ident = format_ident!("{}", self.get_name());
         if self.is_array() {
             return quote! {
-                Versionize::serialize(&copy_of_self.#field_ident.to_vec(), writer, version_map, app_version)
+                unsafe {
+                    Versionize::serialize(&copy_of_self.#field_ident.to_vec(), writer, version_map, app_version)
+                }
             };
         }
 
         quote! {
-            Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version)
+            unsafe {
+                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version)
+            }
         }
     }
 
-    // Emits code that serializes this field.
-    fn generate_deserializer(&self, _source_version: u16) -> proc_macro2::TokenStream {
-        // We do not need to do anything here, we always deserialize whatever variant is encoded.
-        quote! {}
+    fn generate_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+        let field_ident = format_ident!("{}", self.name);
+        let ty = &self.ty;
+
+        match ty {
+            syn::Type::Array(array) => {
+                let array_type_token;
+                let array_len: usize;
+
+                match *array.elem.clone() {
+                    syn::Type::Path(token) => {
+                        array_type_token = token;
+                    }
+                    _ => panic!("Unsupported array type."),
+                }
+
+                match &array.len {
+                    syn::Expr::Lit(expr_lit) => match &expr_lit.lit {
+                        syn::Lit::Int(lit_int) => array_len = lit_int.base10_parse().unwrap(),
+                        _ => panic!("Unsupported array len literal."),
+                    },
+                    _ => panic!("Unsupported array len expression."),
+                }
+
+                quote! {
+                    unsafe {
+                        object.#field_ident = {
+                            let v: Vec<#array_type_token> = <Vec<#array_type_token> as Versionize>::deserialize(&mut reader, version_map, app_version);
+                            vec_to_arr_func!(transform_vec, #array_type_token, #array_len);
+                            transform_vec(&v)
+                        } 
+                    }
+                }
+            }
+            syn::Type::Path(_) => quote! {
+                unsafe { object.#field_ident = <#ty as Versionize>::deserialize(&mut reader, version_map, app_version); }
+            },
+            syn::Type::Reference(_) => quote! {
+                unsafe { object.#field_ident = <#ty as Versionize>::deserialize(&mut reader, version_map, app_version); }
+            },
+            _ => panic!("Unsupported field type {:?}", self.ty),
+        }
     }
 }
