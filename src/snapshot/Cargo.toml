@@ -25,5 +25,5 @@ syn = { version = "1.0.13", features=["default","full"]}
 snapshot_derive = { path = "../snapshot_derive" }
 
 [[bench]]
-name = "snapshot_benchmark"
+name = "basic"
 harness = false

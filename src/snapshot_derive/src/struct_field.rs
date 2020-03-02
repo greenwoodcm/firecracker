@@ -54,7 +54,7 @@ impl FieldVersionize for StructField {
         {
             if let Some(semantic_ser_fn) = self.get_semantic_ser() {
                 return quote! {
-                    copy_of_self.#semantic_ser_fn(version);
+                    copy_of_self.#semantic_ser_fn(version)?;
                 };
             }
         }
@@ -70,7 +70,7 @@ impl FieldVersionize for StructField {
             if let Some(semantic_de_fn) = self.get_semantic_de() {
                 return quote! {
                     // Object is an instance of the structure.
-                    object.#semantic_de_fn(version);
+                    object.#semantic_de_fn(version)?;
                 };
             }
         }

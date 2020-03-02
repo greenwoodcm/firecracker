@@ -63,6 +63,7 @@ struct SnapshotHdr {
     section_count: u16,
 }
 
+#[derive(Debug)]
 pub struct Snapshot {
     hdr: SnapshotHdr,
     format_version: u16,
@@ -78,8 +79,9 @@ pub struct Section {
     data: Vec<u8>,
 }
 
+#[derive(PartialEq)]
 pub enum Error {
-    Io(std::io::Error),
+    Io(i32),
     Serialize(String),
     Deserialize(String),
     Semantic(String),
@@ -205,12 +207,12 @@ impl Snapshot {
                 format_version_map.get_latest_version(),
             )?;
         }
-        writer.flush().map_err(Error::Io)?;
+        writer.flush().map_err(|ref err| Error::Io(err.raw_os_error().unwrap_or(0)))?;
 
         Ok(())
     }
 
-    fn read_section<T>(&mut self, name: &str) -> Result<Option<T>>
+    pub fn read_section<T>(&mut self, name: &str) -> Result<Option<T>>
     where
         T: Versionize + 'static,
     {
@@ -225,7 +227,7 @@ impl Snapshot {
         Ok(None)
     }
 
-    fn write_section<T>(&mut self, name: &str, object: &T) -> Result<()>
+    pub fn write_section<T>(&mut self, name: &str, object: &T) -> Result<usize>
     where
         T: Versionize + 'static,
     {
@@ -241,7 +243,7 @@ impl Snapshot {
             slice.as_ptr() as usize - new_section.data.as_slice().as_ptr() as usize;
         new_section.data.truncate(serialized_len);
         self.sections.insert(name.to_owned(), new_section);
-        Ok(())
+        Ok(serialized_len)
     }
 
     fn format_version_map() -> VersionMap {
@@ -250,51 +252,6 @@ impl Snapshot {
     }
 }
 
-// #[inline]
-// pub fn bench_restore_v1() {
-//     let mut snapshot_mem = std::fs::File::open("/tmp/snapshot.fcs").unwrap();
-//     let vm = VersionMap::new();
-
-//     #[repr(C)]
-//     #[derive(Copy, Debug, Clone, Versionize, PartialEq)]
-//     pub struct kvm_lapic_state {
-//         pub regs: [::std::os::raw::c_char; 32],
-//     }
-
-//     #[derive(Versionize, Debug, PartialEq, Clone)]
-//     pub struct MmioDeviceState {
-//         pub addr: u64,
-//         pub irq: u32,
-//         pub device_activated: bool,
-//         pub features_select: u32,
-//         pub acked_features_select: u32,
-//         pub queue_select: u32,
-//         pub interrupt_status: usize,
-//         pub driver_status: u32,
-//         pub config_generation: u32,
-//         pub queues: Vec<u8>,
-//         pub lapics: Vec<kvm_lapic_state>,
-//     }
-
-//     let mut loaded_snapshot = Snapshot::load(&mut snapshot_mem, vm.clone()).unwrap();
-
-//     for _ in 0..100 {
-//         if let Some(mut state) = loaded_snapshot
-//             .read_section::<MmioDeviceState>("first")
-//             .unwrap()
-//         {
-//             //println!("Restore state1 {:?}", state1);
-//             state.irq = 0;
-//         }
-//         if let Some(mut state) = loaded_snapshot
-//             .read_section::<MmioDeviceState>("second")
-//             .unwrap()
-//         {
-//             //println!("Restore state2 {:?}", state2);
-//             state.irq = 0;
-//         }
-//     }
-// }
 
 mod tests {
     #![allow(non_upper_case_globals)]
@@ -346,14 +303,14 @@ mod tests {
     }
 
     #[derive(Versionize, Clone, Default, Debug)]
-    struct Test1 {
+    pub struct Test1 {
         fieldX: u64,
         field0: u64,
         field1: u32,
     }
 
     #[derive(Versionize, Clone, Default, Debug)]
-    struct Test {
+    pub struct Test {
         fieldX: u64,
         field0: u64,
         field1: u32,
@@ -385,26 +342,38 @@ mod tests {
         fn field4_default(_: u16) -> Vec<u64> {
             vec![1, 2, 3, 4]
         }
-        fn field4_serialize(&mut self, target_version: u16) {
+        fn field4_serialize(&mut self, target_version: u16) -> Result<()> {
             // Fail if semantic serialization is called for the latest version.
             assert_ne!(target_version, Test::version());
             self.field0 = self.field4.iter().sum();
+
+            if self.field0 == 6666 {
+                return Err(Error::Semantic("field4 element sum is 6666".to_owned()));
+            }
+            Ok(())
         }
-        fn field4_deserialize(&mut self, source_version: u16) {
+        fn field4_deserialize(&mut self, source_version: u16) -> Result<()> {
             // Fail if semantic deserialization is called for the latest version.
             assert_ne!(source_version, Test::version());
             self.field4 = vec![self.field0; 4];
+            Ok(())
         }
 
-        fn field3_serialize(&mut self, target_version: u16) {
+        fn field3_serialize(&mut self, target_version: u16) -> Result<()> {
             // Fail if semantic serialization is called for the previous versions only.
             assert!(target_version < 3);
             self.fieldX += 1;
+            Ok(())
         }
-        fn field3_deserialize(&mut self, source_version: u16) {
+
+        fn field3_deserialize(&mut self, source_version: u16) -> Result<()> {
             // Fail if semantic deserialization is called for the latest version.
             assert!(source_version < 3);
             self.fieldX += 1;
+            if self.field0 == 7777 {
+                return Err(Error::Semantic("field0 is 7777".to_owned()));
+            }
+            Ok(())
         }
     }
 
@@ -465,6 +434,115 @@ mod tests {
         // The semantic fn must not be called.
         assert_eq!(restored_state.field0, 0);
         assert_eq!(restored_state.field4, vec![4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn test_semantic_serialize_error() {
+        let mut vm = VersionMap::new();
+        vm.new_version()
+            .set_type_version(Test::name(), 2)
+            .new_version()
+            .set_type_version(Test::name(), 3)
+            .new_version()
+            .set_type_version(Test::name(), 4);
+        
+        let state = Test {
+            field0: 0,
+            field1: 1,
+            field2: 2,
+            field3: "test".to_owned(),
+            field4: vec![6000, 600, 60, 6],
+            fieldX: 0,
+        };
+        
+        let mut snapshot = Snapshot::new(vm.clone(), 4);
+        // The section will succesfully be serialized.
+        assert!(snapshot.write_section("test", &state).is_ok());
+
+        snapshot = Snapshot::new(vm.clone(), 1);
+        // The section will fail due to a custom semantic error.
+        assert_eq!(snapshot.write_section("test", &state), Err(Error::Semantic("field4 element sum is 6666".to_owned())));
+    }
+
+    #[test]
+    fn test_semantic_deserialize_error() {
+        let mut vm = VersionMap::new();
+        vm.new_version()
+            .set_type_version(Test::name(), 2)
+            .new_version()
+            .set_type_version(Test::name(), 3)
+            .new_version()
+            .set_type_version(Test::name(), 4);
+        
+        let state = Test {
+            field0: 6666,
+            field1: 1,
+            field2: 2,
+            field3: "fail".to_owned(),
+            field4: vec![7000, 700, 70, 7],
+            fieldX: 0,
+        };
+
+        let mut snapshot_mem = vec![0u8; 1024];
+        
+        let mut snapshot = Snapshot::new(vm.clone(), 2);
+        // The section will succesfully be serialized.
+        assert!(snapshot.write_section("test", &state).is_ok());
+        assert_eq!(snapshot.save(&mut snapshot_mem.as_mut_slice()), Ok(()));
+
+        snapshot = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap();
+        // The section load will fail due to a custom semantic error.
+        let section_read_error = snapshot.read_section::<Test>("test").unwrap_err();
+        assert_eq!(section_read_error, Error::Semantic("field0 is 7777".to_owned()));
+
+    }
+
+    #[test]
+    fn test_serialize_error() {
+        let vm = VersionMap::new();
+        let state_1 = Test1 {
+            fieldX: 0,
+            field0: 0,
+            field1: 1,
+        };
+
+        let mut snapshot_mem = vec![0u8; 1];
+
+        // Serialize as v1.
+        let mut snapshot = Snapshot::new(vm.clone(), 1);
+        // The section will succesfully be serialized.
+        assert!(snapshot.write_section("test", &state_1).is_ok());
+        assert_eq!(snapshot.save(&mut snapshot_mem.as_mut_slice()).unwrap_err(), Error::Serialize("io error: failed to write whole buffer".to_owned()));
+    }
+
+    #[test]
+    fn test_deserialize_error() {
+        let mut vm = VersionMap::new();
+        vm.new_version()
+            .set_type_version(Test::name(), 2)
+            .new_version()
+            .set_type_version(Test::name(), 3)
+            .new_version()
+            .set_type_version(Test::name(), 4);
+        let state = Test {
+            field0: 0,
+            field1: 1,
+            field2: 2,
+            field3: "test".to_owned(),
+            field4: vec![4, 3, 2, 1],
+            fieldX: 0,
+        };
+
+        let mut snapshot_mem = vec![0u8; 1024];
+
+        let mut snapshot = Snapshot::new(vm.clone(), 4);
+        // The section will succesfully be serialized.
+        assert!(snapshot.write_section("test", &state).is_ok());
+        assert_eq!(snapshot.save(&mut snapshot_mem.as_mut_slice()), Ok(()));
+
+        snapshot_mem.truncate(10);
+        let snapshot_load_error = Snapshot::load(&mut snapshot_mem.as_slice(), vm.clone()).unwrap_err();
+        assert_eq!(snapshot_load_error, Error::Deserialize("io error: failed to fill whole buffer".to_owned()));
     }
 
     #[test]
@@ -636,8 +714,9 @@ mod tests {
                 "whatever".to_owned()
             }
 
-            fn semantic_x(&mut self, _target_version: u16) {
+            fn semantic_x(&mut self, _target_version: u16) -> Result<()> {
                 self.x = self.q as u32;
+                Ok(())
             }
         }
 
