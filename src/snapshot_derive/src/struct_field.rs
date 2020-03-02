@@ -54,7 +54,7 @@ impl FieldVersionize for StructField {
         {
             if let Some(semantic_ser_fn) = self.get_semantic_ser() {
                 return quote! {
-                    #semantic_ser_fn(&mut copy_of_self, version);
+                    copy_of_self.#semantic_ser_fn(version);
                 };
             }
         }
@@ -70,7 +70,7 @@ impl FieldVersionize for StructField {
             if let Some(semantic_de_fn) = self.get_semantic_de() {
                 return quote! {
                     // Object is an instance of the structure.
-                    #semantic_de_fn(&mut object, version);
+                    object.#semantic_de_fn(version);
                 };
             }
         }
@@ -90,13 +90,13 @@ impl FieldVersionize for StructField {
 
         match &self.ty {
             syn::Type::Array(_) => quote! {
-                Versionize::serialize(&copy_of_self.#field_ident.to_vec(), writer, version_map, app_version);
+                Versionize::serialize(&copy_of_self.#field_ident.to_vec(), writer, version_map, app_version)?;
             },
             syn::Type::Path(_) => quote! {
-                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version);
+                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version)?;
             },
             syn::Type::Reference(_) => quote! {
-                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version);
+                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version)?;
             },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }
@@ -115,7 +115,7 @@ impl FieldVersionize for StructField {
                     // The default_fn is called with source version of the struct:
                     // - `version` is set to version_map.get_type_version(app_version, &Self::name());
                     // - `app_version` is source application version.
-                    #field_ident: #default_fn(version),
+                    #field_ident: Self::#default_fn(version),
                 };
             } else {
                 return quote! { #field_ident: Default::default(), };
@@ -146,17 +146,17 @@ impl FieldVersionize for StructField {
 
                 quote! {
                     #field_ident: {
-                        let v: Vec<#array_type_token> = <Vec<#array_type_token> as Versionize>::deserialize(&mut reader, version_map, app_version);
+                        let v: Vec<#array_type_token> = <Vec<#array_type_token> as Versionize>::deserialize(&mut reader, version_map, app_version)?;
                         vec_to_arr_func!(transform_vec, #array_type_token, #array_len);
                         transform_vec(&v)
                     },
                 }
             }
             syn::Type::Path(_) => quote! {
-                #field_ident: <#ty as Versionize>::deserialize(&mut reader, version_map, app_version),
+                #field_ident: <#ty as Versionize>::deserialize(&mut reader, version_map, app_version)?,
             },
             syn::Type::Reference(_) => quote! {
-                #field_ident: <#ty as Versionize>::deserialize(&mut reader, version_map, app_version),
+                #field_ident: <#ty as Versionize>::deserialize(&mut reader, version_map, app_version)?,
             },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }

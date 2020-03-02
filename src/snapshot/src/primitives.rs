@@ -1,4 +1,4 @@
-use self::super::{VersionMap, Versionize};
+use self::super::{Error, Result, VersionMap, Versionize};
 
 macro_rules! primitive_versionize {
     ($ty:ident) => {
@@ -9,16 +9,22 @@ macro_rules! primitive_versionize {
                 writer: &mut W,
                 _version_map: &VersionMap,
                 _version: u16,
-            ) {
-                bincode::serialize_into(writer, &self).unwrap();
+            ) -> Result<()> {
+                bincode::serialize_into(writer, &self)
+                    .map_err(|ref err| Error::Serialize(format!("{}", err)))?;
+                Ok(())
             }
             #[inline]
             fn deserialize<R: std::io::Read>(
                 mut reader: &mut R,
                 _version_map: &VersionMap,
                 _version: u16,
-            ) -> Self {
-                bincode::deserialize_from(&mut reader).unwrap()
+            ) -> Result<Self>
+            where
+                Self: Sized,
+            {
+                Ok(bincode::deserialize_from(&mut reader)
+                    .map_err(|ref err| Error::Deserialize(format!("{}", err)))?)
             }
 
             // Not used.
@@ -65,13 +71,16 @@ where
         mut writer: &mut W,
         version_map: &VersionMap,
         app_version: u16,
-    ) {
+    ) -> Result<()> {
         // Serialize in the same fashion as bincode:
         // len, T, T, ...
-        bincode::serialize_into(&mut writer, &self.len()).unwrap();
+        bincode::serialize_into(&mut writer, &self.len())
+            .map_err(|ref err| Error::Serialize(format!("{}", err)))?;
         for obj in self {
-            obj.serialize(writer, version_map, app_version);
+            obj.serialize(writer, version_map, app_version)
+                .map_err(|ref err| Error::Serialize(format!("{}", err)))?;
         }
+        Ok(())
     }
 
     #[inline]
@@ -79,14 +88,16 @@ where
         mut reader: &mut R,
         version_map: &VersionMap,
         app_version: u16,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut v = Vec::new();
-        let len: u64 = bincode::deserialize_from(&mut reader).unwrap();
+        let len: u64 = bincode::deserialize_from(&mut reader)
+            .map_err(|ref err| Error::Deserialize(format!("{}", err)))?;
         for _ in 0..len {
-            let obj: T = T::deserialize(reader, version_map, app_version);
+            let obj: T = T::deserialize(reader, version_map, app_version)
+                .map_err(|ref err| Error::Deserialize(format!("{}", err)))?;
             v.push(obj);
         }
-        v
+        Ok(v)
     }
 
     // Not used.

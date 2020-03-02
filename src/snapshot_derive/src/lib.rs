@@ -33,12 +33,13 @@ pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
     let output = quote! {
         impl Versionize for #ident #generics {
             #[inline]
-            fn serialize<W: std::io::Write>(&self, writer: &mut W, version_map: &VersionMap, app_version: u16) {
+            fn serialize<W: std::io::Write>(&self, writer: &mut W, version_map: &VersionMap, app_version: u16) -> Result<()> {
                 #serializer
+                Ok(())
             }
 
             #[inline]
-            fn deserialize<R: std::io::Read>(mut reader: &mut R, version_map: &VersionMap, app_version: u16) -> Self {
+            fn deserialize<R: std::io::Read>(mut reader: &mut R, version_map: &VersionMap, app_version: u16) -> Result<Self> {
                 #deserializer
             }
 
@@ -60,6 +61,6 @@ pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
     //     println!("{}", output.to_string());
 
     // }
-    println!("{}", output.to_string());
+    // println!("{}", output.to_string());
     output.into()
 }

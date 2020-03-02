@@ -53,8 +53,8 @@ impl FieldVersionize for EnumVariant {
             if let Some(default_fn_ident) = self.get_default() {
                 return quote! {
                     Self::#field_ident => {
-                        let variant = #default_fn_ident(&self, version);
-                        bincode::serialize_into(writer, &variant).unwrap();
+                        let variant = self.#default_fn_ident(version);
+                        bincode::serialize_into(writer, &variant).map_err(|ref err| Error::Serialize(format!("{}", err)))?;
                     },
                 };
             } else {
@@ -64,7 +64,7 @@ impl FieldVersionize for EnumVariant {
 
         quote! {
             Self::#field_ident => {
-                bincode::serialize_into(writer, &self).unwrap();
+                bincode::serialize_into(writer, &self).map_err(|ref err| Error::Serialize(format!("{}", err)))?;
             },
         }
     }

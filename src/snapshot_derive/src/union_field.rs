@@ -94,14 +94,14 @@ impl FieldVersionize for UnionField {
         if self.is_array() {
             return quote! {
                 unsafe {
-                    Versionize::serialize(&copy_of_self.#field_ident.to_vec(), writer, version_map, app_version)
+                    Versionize::serialize(&copy_of_self.#field_ident.to_vec(), writer, version_map, app_version)?
                 }
             };
         }
 
         quote! {
             unsafe {
-                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version)
+                Versionize::serialize(&copy_of_self.#field_ident, writer, version_map, app_version)?
             }
         }
     }
@@ -133,18 +133,18 @@ impl FieldVersionize for UnionField {
                 quote! {
                     unsafe {
                         object.#field_ident = {
-                            let v: Vec<#array_type_token> = <Vec<#array_type_token> as Versionize>::deserialize(&mut reader, version_map, app_version);
+                            let v: Vec<#array_type_token> = <Vec<#array_type_token> as Versionize>::deserialize(&mut reader, version_map, app_version)?;
                             vec_to_arr_func!(transform_vec, #array_type_token, #array_len);
                             transform_vec(&v)
-                        } 
+                        }
                     }
                 }
             }
             syn::Type::Path(_) => quote! {
-                unsafe { object.#field_ident = <#ty as Versionize>::deserialize(&mut reader, version_map, app_version); }
+                unsafe { object.#field_ident = <#ty as Versionize>::deserialize(&mut reader, version_map, app_version)?; }
             },
             syn::Type::Reference(_) => quote! {
-                unsafe { object.#field_ident = <#ty as Versionize>::deserialize(&mut reader, version_map, app_version); }
+                unsafe { object.#field_ident = <#ty as Versionize>::deserialize(&mut reader, version_map, app_version)?; }
             },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }

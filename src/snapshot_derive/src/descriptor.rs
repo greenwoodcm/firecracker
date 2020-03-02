@@ -112,7 +112,7 @@ impl DataDescriptor {
                 matcher.extend(quote! {
                     #index => #field_serializer,
                 });
-                index+=1;
+                index += 1;
             }
         }
 
@@ -154,7 +154,7 @@ impl DataDescriptor {
                 matcher.extend(quote! {
                     #index => #field_deserializer,
                 });
-                index+=1;
+                index += 1;
             }
         }
 
@@ -277,7 +277,7 @@ impl DataDescriptor {
                                 #versioned_deserializer
                             };
                             #semantic_deserializer
-                            object
+                            Ok(object)
                         }
                     });
                 }
@@ -294,21 +294,21 @@ impl DataDescriptor {
             }
             DescriptorKind::Enum => {
                 quote! {
-                    let variant: #struct_ident = bincode::deserialize_from(&mut reader).unwrap();
-                    variant
+                    let variant: #struct_ident = bincode::deserialize_from(&mut reader).map_err(|ref err| Error::Deserialize(format!("{}", err)))?;
+                    Ok(variant)
                 }
             }
             DescriptorKind::Union => {
                 for i in 1..=self.version {
-                    let mut versioned_deserializer = proc_macro2::TokenStream::new();
+                    let versioned_deserializer = proc_macro2::TokenStream::new();
 
                     let union_serializer = self.generate_union_deserializer(i);
 
                     versioned_deserializers.extend(quote! {
                         #i => {
                             let mut object = Self::default();
-                            #union_serializer
-                            object
+                            #union_serializer;
+                            Ok(object)
                         }
                     });
                 }
