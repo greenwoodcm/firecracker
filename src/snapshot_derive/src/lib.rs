@@ -20,15 +20,38 @@ use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
 #[proc_macro_derive(Versionize, attributes(snapshot))]
-pub fn generate_versioned(input: TokenStream) -> proc_macro::TokenStream {
+pub fn generate_versionizer(input: TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let ident = input.ident.clone();
     let generics = input.generics.clone();
-    let descriptor = DataDescriptor::new(&input);
-    let ident = &descriptor.ty;
-    let name = descriptor.ty.to_string();
-    let version = descriptor.version;
-    let serializer = descriptor.generate_serializer();
-    let deserializer = descriptor.generate_deserializer();
+    let serializer;
+    let deserializer;
+    let name;
+    let version;
+
+    match &input.data {
+        syn::Data::Struct(data_struct) => {
+            let descriptor = StructDescriptor::new(&data_struct, ident.clone());
+            name = descriptor.ty.to_string();
+            version = descriptor.version;
+            serializer = descriptor.generate_serializer();
+            deserializer = descriptor.generate_deserializer(); 
+        }
+        syn::Data::Enum(data_enum) => {
+            let descriptor = EnumDescriptor::new(&data_enum, ident.clone());
+            name = descriptor.ty.to_string();
+            version = descriptor.version;
+            serializer = descriptor.generate_serializer();
+            deserializer = descriptor.generate_deserializer(); 
+        }
+        syn::Data::Union(data_union) => {
+            let descriptor = UnionDescriptor::new(&data_union, ident.clone());
+            name = descriptor.ty.to_string();
+            version = descriptor.version;
+            serializer = descriptor.generate_serializer();
+            deserializer = descriptor.generate_deserializer(); 
+        }
+    }
 
     let output = quote! {
         impl Versionize for #ident #generics {

@@ -1,7 +1,6 @@
 use common::*;
 use quote::{format_ident, quote};
 use std::collections::hash_map::HashMap;
-use versionize::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct StructField {
@@ -12,7 +11,41 @@ pub(crate) struct StructField {
     attrs: HashMap<String, syn::Lit>,
 }
 
-impl FieldVersionize for StructField {
+impl StructField {
+    // Parses the abstract syntax tree and create a versioned Field definition.
+    pub fn new(
+        base_version: u16,
+        ast_field: syn::punctuated::Pair<&syn::Field, &syn::token::Comma>,
+    ) -> Self {
+        let name = ast_field.value().ident.as_ref().unwrap().to_string();
+        let mut field = StructField {
+            ty: ast_field.value().ty.clone(),
+            name,
+            start_version: base_version,
+            end_version: 0,
+            attrs: HashMap::new(),
+        };
+
+        parse_field_attributes(&mut field.attrs, &ast_field.value().attrs);
+
+        // Adjust version based on attributes.
+        if let Some(start_version) = field.get_attr("start_version") {
+            match start_version {
+                syn::Lit::Int(lit_int) => field.start_version = lit_int.base10_parse().unwrap(),
+                _ => panic!("Field start/end version number must be an integer"),
+            }
+        }
+
+        if let Some(end_version) = field.get_attr("end_version") {
+            match end_version {
+                syn::Lit::Int(lit_int) => field.end_version = lit_int.base10_parse().unwrap(),
+                _ => panic!("Field start/end version number must be an integer"),
+            }
+        }
+
+        field
+    }
+
     fn get_default(&self) -> Option<syn::Ident> {
         get_ident_attr(&self.attrs, "default_fn")
     }
@@ -29,25 +62,22 @@ impl FieldVersionize for StructField {
         self.attrs.get(attr)
     }
 
-    fn get_start_version(&self) -> u16 {
+    pub fn get_start_version(&self) -> u16 {
         self.start_version
     }
-    fn get_end_version(&self) -> u16 {
+
+    pub fn get_end_version(&self) -> u16 {
         self.end_version
     }
 
-    fn is_array(&self) -> bool {
+    pub fn is_array(&self) -> bool {
         match self.ty {
             syn::Type::Array(_) => true,
             _ => false,
         }
     }
 
-    fn get_type(&self) -> syn::Type {
-        self.ty.clone()
-    }
-
-    fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
+    pub fn generate_semantic_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
         // Generate semantic serializer for this field only if it does not exist in target_version.
         if target_version < self.start_version
             || (self.end_version > 0 && target_version > self.end_version)
@@ -62,7 +92,7 @@ impl FieldVersionize for StructField {
     }
 
     // !! Semantic deserialization not supported for enums.
-    fn generate_semantic_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+    pub fn generate_semantic_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
         // Generate semantic deserializer for this field only if it does not exist in target_version.
         if source_version < self.start_version
             || (self.end_version > 0 && source_version > self.end_version)
@@ -78,7 +108,7 @@ impl FieldVersionize for StructField {
     }
 
     // Emits code that serializes this field.
-    fn generate_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
+    pub fn generate_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
         let field_ident = format_ident!("{}", self.name);
 
         // Generate serializer for this field only if it exists in target_version.
@@ -103,7 +133,7 @@ impl FieldVersionize for StructField {
     }
 
     // Emits code that deserializes this field.
-    fn generate_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+    pub fn generate_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
         let field_ident = format_ident!("{}", self.name);
 
         // If the field does not exist in source version, use default annotation or Default trait.
@@ -160,41 +190,5 @@ impl FieldVersionize for StructField {
             },
             _ => panic!("Unsupported field type {:?}", self.ty),
         }
-    }
-}
-
-impl StructField {
-    // Parses the abstract syntax tree and create a versioned Field definition.
-    pub fn new(
-        base_version: u16,
-        ast_field: syn::punctuated::Pair<&syn::Field, &syn::token::Comma>,
-    ) -> Self {
-        let name = ast_field.value().ident.as_ref().unwrap().to_string();
-        let mut field = StructField {
-            ty: ast_field.value().ty.clone(),
-            name,
-            start_version: base_version,
-            end_version: 0,
-            attrs: HashMap::new(),
-        };
-
-        parse_field_attributes(&mut field.attrs, &ast_field.value().attrs);
-
-        // Adjust version based on attributes.
-        if let Some(start_version) = field.get_attr("start_version") {
-            match start_version {
-                syn::Lit::Int(lit_int) => field.start_version = lit_int.base10_parse().unwrap(),
-                _ => panic!("Field start/end version number must be an integer"),
-            }
-        }
-
-        if let Some(end_version) = field.get_attr("end_version") {
-            match end_version {
-                syn::Lit::Int(lit_int) => field.end_version = lit_int.base10_parse().unwrap(),
-                _ => panic!("Field start/end version number must be an integer"),
-            }
-        }
-
-        field
     }
 }

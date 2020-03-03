@@ -1,7 +1,6 @@
 use common::*;
 use quote::{format_ident, quote};
 use std::collections::hash_map::HashMap;
-use versionize::*;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct UnionField {
@@ -45,25 +44,20 @@ impl UnionField {
 
         field
     }
-}
-
-impl FieldVersionize for UnionField {
-    fn get_default(&self) -> Option<syn::Ident> {
-        get_ident_attr(&self.attrs, "default_fn")
-    }
 
     fn get_attr(&self, attr: &str) -> Option<&syn::Lit> {
         self.attrs.get(attr)
     }
 
-    fn get_start_version(&self) -> u16 {
+    pub fn get_start_version(&self) -> u16 {
         self.start_version
     }
-    fn get_end_version(&self) -> u16 {
+
+    pub fn get_end_version(&self) -> u16 {
         self.end_version
     }
 
-    fn get_type(&self) -> syn::Type {
+    pub fn get_type(&self) -> syn::Type {
         self.ty.clone()
     }
 
@@ -71,25 +65,15 @@ impl FieldVersionize for UnionField {
         self.name.clone()
     }
 
-    fn is_array(&self) -> bool {
+    pub fn is_array(&self) -> bool {
         match self.ty {
             syn::Type::Array(_) => true,
             _ => false,
         }
     }
 
-    // Semantic serialization not supported for enums.
-    fn generate_semantic_serializer(&self, _target_version: u16) -> proc_macro2::TokenStream {
-        quote! {}
-    }
-
-    // Semantic deserialization not supported for enums.
-    fn generate_semantic_deserializer(&self, _source_version: u16) -> proc_macro2::TokenStream {
-        quote! {}
-    }
-
     // Emits code that serializes a union field.
-    fn generate_serializer(&self, target_version: u16) -> proc_macro2::TokenStream {
+    pub fn generate_serializer(&self, _target_version: u16) -> proc_macro2::TokenStream {
         let field_ident = format_ident!("{}", self.get_name());
         if self.is_array() {
             return quote! {
@@ -106,7 +90,7 @@ impl FieldVersionize for UnionField {
         }
     }
 
-    fn generate_deserializer(&self, source_version: u16) -> proc_macro2::TokenStream {
+    pub fn generate_deserializer(&self, _source_version: u16) -> proc_macro2::TokenStream {
         let field_ident = format_ident!("{}", self.name);
         let ty = &self.ty;
 
@@ -149,4 +133,5 @@ impl FieldVersionize for UnionField {
             _ => panic!("Unsupported field type {:?}", self.ty),
         }
     }
+
 }

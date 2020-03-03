@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(section_read_error, Error::Semantic("field0 is 7777".to_owned()));
 
     }
-
+    
     #[test]
     fn test_serialize_error() {
         let vm = VersionMap::new();
