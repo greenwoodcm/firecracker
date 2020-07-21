@@ -203,6 +203,7 @@ fn create_vmm_and_vcpus(
     track_dirty_pages: bool,
     vcpu_count: u8,
 ) -> std::result::Result<(Vmm, Vec<Vcpu>), StartMicrovmError> {
+
     use self::StartMicrovmError::*;
     // Timestamp for measuring microVM boot duration.
     let request_ts = TimestampUs::default();
@@ -229,8 +230,16 @@ fn create_vmm_and_vcpus(
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
     let pio_device_manager = {
+        let mut start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
         setup_interrupt_controller(&mut vm)?;
+        info!("[Resume hotpath] Setup APIC: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+
+        start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
         vcpus = create_vcpus(&vm, vcpu_count, request_ts, &exit_evt).map_err(Internal)?;
+        info!("[Resume hotpath] Create vCPUs: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+
+        start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
 
         // Serial device setup.
         let serial_device = setup_serial_device(
@@ -244,8 +253,11 @@ fn create_vmm_and_vcpus(
             .try_clone()
             .map_err(Error::EventFd)
             .map_err(Internal)?;
-        create_pio_dev_manager_with_legacy_devices(&vm, serial_device, reset_evt)
-            .map_err(Internal)?
+        let result = create_pio_dev_manager_with_legacy_devices(&vm, serial_device, reset_evt)
+            .map_err(Internal);
+        info!("[Resume hotpath] Create legacy devices: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+
+        result?
     };
 
     // On aarch64, the vCPUs need to be created (i.e call KVM_CREATE_VCPU) before setting up the
@@ -370,11 +382,14 @@ pub fn build_microvm_from_snapshot(
     track_dirty_pages: bool,
     seccomp_filter: BpfProgramRef,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
+    let mut start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
     use self::StartMicrovmError::*;
     let vcpu_count = u8::try_from(microvm_state.vcpu_states.len())
         .map_err(|_| MicrovmStateError::InvalidInput)
         .map_err(RestoreMicrovmState)?;
 
+    
     // Build Vmm.
     let (mut vmm, vcpus) = create_vmm_and_vcpus(
         event_manager,
@@ -383,11 +398,16 @@ pub fn build_microvm_from_snapshot(
         vcpu_count,
     )?;
 
+    info!("[Resume hotpath] Create Vmm and vcpus time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
     // Restore kvm vm state.
     vmm.vm
         .restore_state(&microvm_state.vm_state)
         .map_err(MicrovmStateError::RestoreVmState)
         .map_err(RestoreMicrovmState)?;
+
+    info!("[Resume hotpath] KVM VM restore time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
 
     // Restore devices states.
     let mmio_ctor_args = MMIODevManagerConstructorArgs {
@@ -395,18 +415,27 @@ pub fn build_microvm_from_snapshot(
         vm: vmm.vm.fd(),
         event_manager,
     };
+
     vmm.mmio_device_manager =
         MMIODeviceManager::restore(mmio_ctor_args, &microvm_state.device_states)
             .map_err(MicrovmStateError::RestoreDevices)
             .map_err(RestoreMicrovmState)?;
 
+    info!("[Resume hotpath] Restore mmio devices time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
     vmm.start_vcpus(vcpus, seccomp_filter)
         .map_err(StartMicrovmError::Internal)?;
+    info!("[Resume hotpath] Start vcpus time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
 
     // Restore vcpus kvm state.
     vmm.restore_vcpu_states(microvm_state.vcpu_states)
         .map_err(RestoreMicrovmState)?;
+
+    info!("[Resume hotpath] Restore vcpus time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
 
     let vmm = Arc::new(Mutex::new(vmm));
     event_manager
@@ -418,6 +447,8 @@ pub fn build_microvm_from_snapshot(
     SeccompFilter::apply(seccomp_filter.to_vec())
         .map_err(Error::SeccompFilters)
         .map_err(StartMicrovmError::Internal)?;
+    
+        info!("[Resume hotpath] Seccomp apply time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
 
     Ok(vmm)
 }
@@ -512,14 +543,25 @@ pub(crate) fn setup_kvm_vm(
     guest_memory: &GuestMemoryMmap,
     track_dirty_pages: bool,
 ) -> std::result::Result<Vm, StartMicrovmError> {
+    let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
     use self::StartMicrovmError::Internal;
     let kvm = KvmContext::new()
         .map_err(Error::KvmContext)
         .map_err(Internal)?;
+    info!("[Resume hotpath] Kvm context create time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
     let mut vm = Vm::new(kvm.fd()).map_err(Error::Vm).map_err(Internal)?;
+    info!("[Resume hotpath] Kvm vm creation time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
     vm.memory_init(&guest_memory, kvm.max_memslots(), track_dirty_pages)
         .map_err(Error::Vm)
         .map_err(Internal)?;
+    
+    info!("[Resume hotpath] KVM guest memory setup time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+
     Ok(vm)
 }
 

@@ -553,11 +553,14 @@ impl Vm {
         track_dirty_pages: bool,
     ) -> Result<()> {
         let mut flags = 0u32;
+        
         if track_dirty_pages {
             flags |= KVM_MEM_LOG_DIRTY_PAGES;
         }
         guest_mem
             .with_regions(|index, region| {
+                let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
                 let memory_region = kvm_userspace_memory_region {
                     slot: index as u32,
                     guest_phys_addr: region.start_addr().raw_value() as u64,
@@ -568,7 +571,9 @@ impl Vm {
                 };
 
                 // Safe because the fd is a valid KVM file descriptor.
-                unsafe { self.fd.set_user_memory_region(memory_region) }
+                let res = unsafe { self.fd.set_user_memory_region(memory_region) };
+                info!("[Resume hotpath] KVM_SET_USER_MEMORY_REGION({}): {} us", index, utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+                res
             })
             .map_err(Error::SetUserMemoryRegion)?;
         Ok(())

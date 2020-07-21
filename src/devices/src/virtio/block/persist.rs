@@ -53,6 +53,8 @@ impl Persist<'_> for Block {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
         let is_disk_read_only = state.virtio_state.avail_features & (1u64 << VIRTIO_BLK_F_RO) != 0;
         let rate_limiter = RateLimiter::restore((), &state.rate_limiter_state)?;
 
@@ -78,6 +80,8 @@ impl Persist<'_> for Block {
         if state.virtio_state.activated {
             block.device_state = DeviceState::Activated(constructor_args.mem);
         }
+
+        info!("[Resume hotpath] Block restore time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
 
         Ok(block)
     }

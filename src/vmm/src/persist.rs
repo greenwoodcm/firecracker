@@ -251,8 +251,15 @@ pub fn load_snapshot(
 ) -> std::result::Result<Arc<Mutex<Vmm>>, LoadSnapshotError> {
     use self::LoadSnapshotError::*;
     let track_dirty = params.enable_diff_snapshots;
+
+    let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
     let microvm_state = snapshot_state_from_file(&params.snapshot_path, version_map)?;
+    info!("[Resume hotpath] Load state: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
     let guest_memory = guest_memory_from_file(&params.mem_file_path, &microvm_state.memory_state)?;
+    info!("[Resume hotpath] Map guest memory: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+
     builder::build_microvm_from_snapshot(
         event_manager,
         microvm_state,
@@ -268,9 +275,16 @@ fn snapshot_state_from_file(
     version_map: VersionMap,
 ) -> std::result::Result<MicrovmState, LoadSnapshotError> {
     use self::LoadSnapshotError::{DeserializeMicrovmState, SnapshotBackingFile};
-    let mut snapshot_reader =
-        std::io::BufReader::new(File::open(snapshot_path).map_err(SnapshotBackingFile)?);
-    Snapshot::load(&mut snapshot_reader, version_map).map_err(DeserializeMicrovmState)
+    let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+    let snapshot_file = File::open(snapshot_path).map_err(SnapshotBackingFile)?;
+    let mut reader = std::io::BufReader::new(snapshot_file);
+    info!("[Resume hotpath] Open state file: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+    let start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
+
+    let result = Snapshot::load(&mut reader, version_map).map_err(DeserializeMicrovmState);
+    info!("[Resume hotpath] Deserialize state file: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+
+    result
 }
 
 fn guest_memory_from_file(

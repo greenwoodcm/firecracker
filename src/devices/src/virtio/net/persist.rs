@@ -69,11 +69,15 @@ impl Persist<'_> for Net {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> std::result::Result<Self, Self::Error> {
+        let mut start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
         // RateLimiter::restore() can fail at creating a timerfd.
         let rx_rate_limiter = RateLimiter::restore((), &state.rx_rate_limiter_state)
             .map_err(Error::CreateRateLimiter)?;
         let tx_rate_limiter = RateLimiter::restore((), &state.tx_rate_limiter_state)
             .map_err(Error::CreateRateLimiter)?;
+        info!("[Resume hotpath] Rate limiter restore time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
+
+        start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
         let mut net = Net::new_with_tap(
             state.id.clone(),
             state.tap_if_name.clone(),
@@ -83,13 +87,17 @@ impl Persist<'_> for Net {
             state.mmds_ns.is_some(),
         )
         .map_err(Error::CreateNet)?;
+        info!("[Resume hotpath] Tap restore time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
 
+        start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
         // Safe to unwrap because MmdsNetworkStack::restore() cannot fail.
         net.mmds_ns = state
             .mmds_ns
             .as_ref()
             .map(|mmds_state| MmdsNetworkStack::restore((), &mmds_state).unwrap());
+        info!("[Resume hotpath] Mmds restore time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
 
+        start = utils::time::get_time_us(utils::time::ClockType::Monotonic);
         // Safe to unwrap because Queue::restore() cannot fail.
         net.queues = state
             .virtio_state
@@ -111,6 +119,7 @@ impl Persist<'_> for Net {
         if state.virtio_state.activated {
             net.device_state = DeviceState::Activated(constructor_args.mem);
         }
+        info!("[Resume hotpath] Queue and state restore time: {} us", utils::time::get_time_us(utils::time::ClockType::Monotonic) - start);
 
         Ok(net)
     }
