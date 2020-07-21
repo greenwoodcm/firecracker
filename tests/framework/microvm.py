@@ -257,6 +257,17 @@ class Microvm:
 
         return json.loads(lines[0])
 
+    def get_all_metrics(self, metrics_fifo):
+        """Flush the microvm metrics.
+
+        Requires specifying the configured metrics file.
+        """
+        # Empty the metrics pipe.
+        response = self.actions.put(action_type='FlushMetrics')
+        assert self.api_session.is_status_no_content(response.status_code)
+
+        return metrics_fifo.sequential_reader(1000)
+
     def append_to_log_data(self, data):
         """Append a message to the log data."""
         self._log_data += data
@@ -426,6 +437,8 @@ class Microvm:
             flush_cmd = 'screen -S {session} -X colon "logfile flush 0^M"'
             utils.run_cmd(flush_cmd.format(session=self._session_name))
 
+        print(utils.run_cmd("chrt -r -p 1 {}".format(self.jailer_clone_pid)))
+
         # Wait for the jailer to create resources needed, and Firecracker to
         # create its API socket.
         # We expect the jailer to start within 80 ms. However, we wait for
@@ -572,8 +585,12 @@ class Microvm:
                 netmask_len
             )
         )
-        self.ssh_config['hostname'] = guest_ip
+        self.config_ssh(guest_ip)
         return tap
+
+    def config_ssh(self, guest_ip):
+        """Configure ssh."""
+        self.ssh_config['hostname'] = guest_ip
 
     def start(self):
         """Start the microvm.

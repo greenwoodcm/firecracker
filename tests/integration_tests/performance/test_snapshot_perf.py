@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Basic tests scenarios for snapshot save/restore."""
 
+import json
 import logging
 import os
 import platform
@@ -10,12 +11,13 @@ from conftest import _test_images_s3_bucket
 from framework.artifacts import ArtifactCollection, ArtifactSet
 from framework.matrix import TestMatrix, TestContext
 from framework.builder import MicrovmBuilder, SnapshotBuilder, SnapshotType
+from framework.utils import run_cmd
 import host_tools.network as net_tools  # pylint: disable=import-error
 import host_tools.logging as log_tools
 
 
 # How many latencies do we sample per test.
-SAMPLE_COUNT = 3
+SAMPLE_COUNT = 50
 
 # Latencies in milliseconds.
 CREATE_LATENCIES = {
@@ -34,8 +36,8 @@ CREATE_LATENCIES = {
 # https://github.com/firecracker-microvm/firecracker/issues/2027
 # TODO: Update the table after fix. Target is < 5ms.
 LOAD_LATENCIES = {
-    '2vcpu_256mb.json': 35,
-    '2vcpu_512mb.json': 35,
+    '2vcpu_256mb.json': 13,
+    '2vcpu_512mb.json': 13,
 }
 
 
@@ -90,9 +92,12 @@ kernel {}, disk {} """.format(snapshot_type,
             value = metrics['latencies_us']['diff_create_snapshot'] / 1000
             baseline = CREATE_LATENCIES[context.microvm.name()]['DIFF']
 
+        if baseline > value:
+            logger.info(vm.log_data)
+
         assert baseline > value, "CreateSnapshot latency degraded."
 
-        logger.info("Latency {}/5: {} ms".format(i + 1, value))
+        logger.info("Latency {}/3: {} ms".format(i + 1, value))
         vm.kill()
 
 
@@ -119,13 +124,16 @@ kernel {}, disk {} """.format(snapshot_type,
                               config=context.microvm,
                               enable_diff_snapshots=enable_diff_snapshots)
 
+    host_ip = None
+    guest_ip = None
+    netmask_len = None
     network_config = net_tools.UniqueIPv4Generator.instance()
     _, host_ip, guest_ip = basevm.ssh_network_config(network_config,
                                                      '1',
                                                      tapname="tap0")
     logger.debug("Host IP: {}, Guest IP: {}".format(host_ip, guest_ip))
 
-    # We will need netmask_len in build_from_snapshot() call later.
+    # # We will need netmask_len in build_from_snapshot() call later.
     netmask_len = network_config.get_netmask_len()
     basevm.start()
     ssh_connection = net_tools.SSHConnection(basevm.ssh_config)
@@ -153,8 +161,6 @@ kernel {}, disk {} """.format(snapshot_type,
                                                 True,
                                                 enable_diff_snapshots)
 
-        metrics = microvm.flush_metrics(metrics_fifo)
-
         # Attempt to connect to resumed microvm.
         ssh_connection = net_tools.SSHConnection(microvm.ssh_config)
 
@@ -162,17 +168,28 @@ kernel {}, disk {} """.format(snapshot_type,
         exit_code, _, _ = ssh_connection.execute_command("sync")
         assert exit_code == 0
 
-        value = metrics['latencies_us']['load_snapshot'] / 1000
-        baseline = LOAD_LATENCIES[context.microvm.name()]
+        # Parse all metric data points in search of load_snapshot time.
+        metrics = microvm.get_all_metrics(metrics_fifo)
+        for data_point in metrics:
+            metrics = json.loads(data_point)
+            cur_value = metrics['latencies_us']['load_snapshot'] / 1000
+            if cur_value > 0:
+                value = cur_value
+                break
 
-        logger.info("Latency {}/5: {} ms".format(i + 1, value))
+        baseline = LOAD_LATENCIES[context.microvm.name()]
+        logger.info("Latency {}/{}: {} ms".format(i + 1, SAMPLE_COUNT, value))
+
+        if baseline < value:
+            logger.info(microvm.log_data)
+
         assert baseline > value, "LoadSnapshot latency degraded."
 
         microvm.kill()
 
 
 @pytest.mark.skipif(
-    platform.machine() != "x86_64",
+    platform.machine() == "x86_64",
     reason="Not supported yet."
 )
 def test_snapshot_create_latency(network_config,
