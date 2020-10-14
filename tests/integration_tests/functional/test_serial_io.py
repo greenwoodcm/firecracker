@@ -18,10 +18,9 @@ class WaitLogin(TestState):  # pylint: disable=too-few-public-methods
     def handle_input(self, serial, input_char) -> TestState:
         """Handle input and return next state."""
         if self.match(input_char):
-            time.sleep(2)
             # Send login username.
             serial.tx("root")
-            time.sleep(2)
+            time.sleep(1)
             return WaitPasswordPrompt("Password:")
         return self
 
@@ -33,9 +32,9 @@ class WaitPasswordPrompt(TestState):  # pylint: disable=too-few-public-methods
         """Handle input and return next state."""
         if self.match(input_char):
             serial.tx("root")
-            time.sleep(2)
+            time.sleep(1)
             serial.tx("id")
-            time.sleep(2)
+            time.sleep(1)
             return WaitIDResult("uid=0(root) gid=0(root) groups=0(root)")
         return self
 
