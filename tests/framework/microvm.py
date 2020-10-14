@@ -44,7 +44,7 @@ class Microvm:
     process.
     """
 
-    SCREEN_LOGFILE = "/tmp/screen.log"
+    SCREEN_LOGFILE = "/tmp/screen-{}.log"
 
     def __init__(
         self,
@@ -79,6 +79,7 @@ class Microvm:
             exec_file=self._fc_binary_path,
         )
         self.jailer_clone_pid = None
+        self._screen_log = None
 
         # Now deal with the things specific to the api session used to
         # communicate with this machine.
@@ -343,17 +344,13 @@ class Microvm:
                     )
                 self.jailer_clone_pid = _pid
         else:
-            # Delete old screen log if any.
-            try:
-                os.unlink(self.SCREEN_LOGFILE)
-            except OSError:
-                pass
+            self._screen_log = self.SCREEN_LOGFILE.format(self._session_name)
             # Log screen output to SCREEN_LOGFILE
             # This file will collect any output from 'screen'ed Firecracker.
             start_cmd = 'screen -L -Logfile {logfile} '\
                         '-dmS {session} {binary} {params}'
             start_cmd = start_cmd.format(
-                logfile=self.SCREEN_LOGFILE,
+                logfile=self._screen_log,
                 session=self._session_name,
                 binary=self._jailer_binary_path,
                 params=' '.join(jailer_param_list)
@@ -403,7 +400,7 @@ class Microvm:
 
     def serial_input(self, input_string):
         """Send a string to the Firecracker serial console via screen."""
-        input_cmd = 'screen -S {session} -p 0 -X stuff "{input_string}^M"'
+        input_cmd = 'screen -S {session} -p 0 -X stuff "{input_string}"'
         run(input_cmd.format(session=self._session_name,
                              input_string=input_string),
             shell=True, check=True)
@@ -539,7 +536,7 @@ class Serial:
             # serial already opened
             return
 
-        screen_log_fd = os.open(Microvm.SCREEN_LOGFILE, os.O_RDONLY)
+        screen_log_fd = os.open(self._vm._screen_log, os.O_RDONLY)
         self._poller = select.poll()
         self._poller.register(screen_log_fd,
                               select.POLLIN | select.POLLHUP)
