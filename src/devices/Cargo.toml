@@ -3,6 +3,7 @@ name = "devices"
 version = "0.1.0"
 authors = ["The Chromium OS Authors"]
 edition = "2018"
+autobenches = false
 
 [dependencies]
 libc = ">=0.2.39"
@@ -22,3 +23,11 @@ snapshot = { path = "../snapshot" }
 utils = { path = "../utils" }
 virtio_gen = { path = "../virtio_gen" }
 
+[dev-dependencies]
+criterion = ">=0.3.0"
+tempfile = "3.1.0"
+nix = "0.14.1"
+
+[[bench]]
+name = "main"
+harness = false
