@@ -19,7 +19,7 @@ pub enum Reg {
     Edx = 3,
 }
 
-const BRAND_STRING_INTEL: &[u8] = b"Intel(R) Xeon(R) Processor";
+const BRAND_STRING_INTEL: &[u8] = b"Intel(R) Xeon(R) Platinum 8259CL CPU";
 const BRAND_STRING_AMD: &[u8] = b"AMD EPYC";
 
 /// A CPUID brand string wrapper, providing some efficient manipulation primitives.

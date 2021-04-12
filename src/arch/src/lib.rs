@@ -1,7 +1,7 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 //! Implements platform specific functionality.
 //! Supported platforms: x86_64 and aarch64.
 use std::fmt;
@@ -27,7 +27,8 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use crate::x86_64::{
     arch_memory_regions, configure_system, get_kernel_start, initrd_load_addr,
-    layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, layout::IRQ_MAX, Error, MMIO_MEM_START,
+    layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, layout::IRQ_MAX, layout::PCI_MMCONFIG_SIZE,
+    layout::PCI_MMCONFIG_START, Error, MMIO_MEM_START, layout::MEM_32BIT_DEVICES_START, layout::MEM_32BIT_DEVICES_SIZE
 };
 
 /// Type for returning public functions outcome.

@@ -132,6 +132,7 @@ impl IrqManager {
 /// Manages the complexities of registering a MMIO device.
 pub struct MMIODeviceManager {
     pub(crate) bus: devices::Bus,
+    pci_bus: Option<Arc<Mutex<dyn BusDevice>>>,
     mmio_base: u64,
     next_avail_mmio: u64,
     irqs: IrqManager,
@@ -143,6 +144,7 @@ impl MMIODeviceManager {
     pub fn new(mmio_base: u64, irq_interval: (u32, u32)) -> MMIODeviceManager {
         MMIODeviceManager {
             mmio_base,
+            pci_bus: None,
             next_avail_mmio: mmio_base,
             irqs: IrqManager::new(irq_interval.0, irq_interval.1),
             bus: devices::Bus::new(),
@@ -151,7 +153,7 @@ impl MMIODeviceManager {
     }
 
     /// Allocates resources for a new device to be added.
-    fn allocate_new_slot(&mut self, irq_count: u32) -> Result<MMIODeviceInfo> {
+    pub fn allocate_new_slot(&mut self, irq_count: u32) -> Result<MMIODeviceInfo> {
         let irqs = self.irqs.get(irq_count)?;
         let slot = MMIODeviceInfo {
             addr: self.next_avail_mmio,
@@ -168,6 +170,19 @@ impl MMIODeviceManager {
             return Err(Error::InvalidInput);
         }
         self.irqs.check(&slot.irqs)
+    }
+
+    /// Register the PCI bus.
+    pub fn register_pci_bus(&mut self, pci_bus: Arc<Mutex<dyn BusDevice>>) -> Result<()> {
+        self.bus
+            .insert(
+                Arc::clone(&pci_bus),
+                arch::PCI_MMCONFIG_START,
+                arch::PCI_MMCONFIG_SIZE,
+            )
+            .map_err(Error::BusError)?;
+        self.pci_bus = Some(pci_bus);
+        Ok(())
     }
 
     /// Register a device at some MMIO address.
@@ -333,7 +348,7 @@ impl MMIODeviceManager {
             .id_to_dev_info
             .get(&(device_type, device_id.to_string()))
         {
-            if let Some((_, device)) = self.bus.get_device(dev_info.addr) {
+            if let Some((_, _, device)) = self.bus.get_device(dev_info.addr) {
                 return Some(device);
             }
         }

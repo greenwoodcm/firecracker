@@ -6,7 +6,7 @@
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_arch = "aarch64")]
@@ -33,18 +33,35 @@ use devices::legacy::RTCDevice;
 use devices::legacy::Serial;
 use devices::virtio::{Balloon, Block, MmioTransport, Net, VirtioDevice, Vsock, VsockUnixBackend};
 use event_manager::{MutEventSubscriber, SubscriberOps};
+use devices::BusDevice;
 use kernel::cmdline::Cmdline as KernelCmdline;
 #[cfg(target_arch = "aarch64")]
 use logger::METRICS;
 use logger::{error, warn};
 use seccompiler::BpfThreadMap;
+use pci::{PciBus, PciConfigIo, PciConfigMmio, PciDevice, PciRoot, VfioPciDevice};
 use snapshot::Persist;
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
 use utils::time::TimestampUs;
+use vfio_ioctls::{VfioContainer, VfioDevice};
 use vm_memory::{GuestAddress, GuestMemoryMmap};
 #[cfg(target_arch = "aarch64")]
 use vm_superio::RTC;
+
+use kvm_bindings::{kvm_create_device, kvm_device_type_KVM_DEV_TYPE_VFIO};
+use kvm_ioctls::{DeviceFd, VmFd};
+use std::path::Path;
+use vm_memory::GuestMemory;
+use vm_memory::GuestMemoryRegion;
+
+use crate::interrupt::KvmMsiInterruptManager as MsiInterruptManager;
+use vm_device::interrupt::{
+    InterruptManager, MsiIrqGroupConfig,
+};
+use vm_allocator::SystemAllocator;
+use vm_allocator::GsiApic;
+
 
 /// Errors associated with starting the instance.
 #[derive(Debug)]
@@ -215,6 +232,135 @@ impl VmmEventsObserver for SerialStdin {
     }
 }
 
+fn create_passthrough_device(vm: &VmFd) -> DeviceFd {
+    let mut vfio_dev = kvm_create_device {
+        type_: kvm_device_type_KVM_DEV_TYPE_VFIO,
+        fd: 0,
+        flags: 0,
+    };
+
+    vm.create_device(&mut vfio_dev).unwrap()
+}
+
+fn add_vfio_device(
+    vm: Arc<Mutex<VmFd>>,
+    fd: DeviceFd,
+    pci: Arc<Mutex<PciBus>>,
+    dev_manager: &mut MMIODeviceManager,
+    pio_manager: &mut PortIODeviceManager,
+    interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
+    memory: GuestMemoryMmap,
+    allocator: Arc<Mutex<SystemAllocator>>
+) {
+    // We need to shift the device id since the 3 first bits
+    // are dedicated to the PCI function, and we know we don't
+    // do multifunction. Also, because we only support one PCI
+    // bus, the bus 0, we don't need to add anything to the
+    // global device ID.
+    let pci_device_bdf = pci.lock().expect("bad lock").next_device_id().unwrap() << 3;
+
+    // Safe because we know the RawFd is valid.
+    //
+    // This dup() is mandatory to be able to give full ownership of the
+    // file descriptor to the DeviceFd::from_raw_fd() function later in
+    // the code.
+    //
+    // This is particularly needed so that VfioContainer will still have
+    // a valid file descriptor even if DeviceManager, and therefore the
+    // passthrough_device are dropped. In case of Drop, the file descriptor
+    // would be closed, but Linux would still have the duplicated file
+    // descriptor opened from DeviceFd, preventing from unexpected behavior
+    // where the VfioContainer would try to use a closed file descriptor.
+    let dup_device_fd = unsafe { libc::dup(fd.as_raw_fd()) };
+
+    // SAFETY the raw fd conversion here is safe because:
+    //   1. This function is only called on KVM, see the feature guard above.
+    //   2. When running on KVM, passthrough_device wraps around DeviceFd.
+    //   3. The conversion here extracts the raw fd and then turns the raw fd into a DeviceFd
+    //      of the same (correct) type.
+    let vfio_container = Arc::new(
+        VfioContainer::new(Arc::new(unsafe { DeviceFd::from_raw_fd(dup_device_fd) })).unwrap(),
+    );
+    let vfio_device = VfioDevice::new(
+        // T4 GPU on g4dn.metal intance.
+        // Path::new("/sys/bus/pci/drivers/vfio-pci/0000:18:00.0"),
+        Path::new("/sys/bus/pci/devices/0000:18:00.0/"),
+        // Path::new("/sys/bus/pci/drivers/vfio-pci/0000:bf:00.1"),
+        Arc::clone(&vfio_container),
+    )
+    .unwrap();
+
+
+    let vfio_pci_device =
+        VfioPciDevice::new(vm, vfio_device, vfio_container.clone(), &interrupt_manager, None, false).unwrap();
+
+    let vfio_pci_device = Arc::new(Mutex::new(vfio_pci_device));
+    let bars = vfio_pci_device
+        .lock()
+        .expect("bad lock")
+        .allocate_bars(&mut allocator.lock().expect("Poisoned lock"))
+        .unwrap();
+
+    // Register DMA mapping in IOMMU.
+    memory
+        .with_regions(|_index, region| {
+            error!(
+                "Mapping DMA for {:x} len {:x} at hva {:x}",
+                region.start_addr().0,
+                region.len() as u64,
+                // memory.get_host_address(region.start_addr()).unwrap() as u64
+                region.as_ptr() as u64
+            );
+            vfio_pci_device.lock().expect("poisoned lock").dma_map(
+                region.start_addr().0,
+                region.len() as u64,
+                // memory.get_host_address(region.start_addr()).unwrap() as u64,
+                region.as_ptr() as u64
+            )
+            // vfio_container.vfio_dma_map(
+            //     region.start_addr().0,
+            //     region.len() as u64,
+            //     memory.get_host_address(region.start_addr()).unwrap() as u64,
+            // )
+    })
+    .unwrap();
+
+    vfio_pci_device
+        .lock()
+        .expect("bad lock")
+        .map_mmio_regions()
+        .unwrap();
+
+    pci.lock()
+        .expect("bad lock")
+        .add_device(pci_device_bdf, vfio_pci_device.clone())
+        .unwrap();
+
+    pci.lock()
+        .expect("bad lock")
+        .register_mapping(
+            vfio_pci_device.clone(),
+            #[cfg(target_arch = "x86_64")]
+            &mut pio_manager.io_bus,
+            &mut dev_manager.bus,
+            bars.clone(),
+        )
+        .unwrap();
+
+    
+
+    // Need to register bus mappings ?
+}
+
+// The MMIO address space size is subtracted with 64k. This is done for the
+// following reasons:
+//  - Reduce the addressable space size by at least 4k to workaround a Linux
+//    bug when the VMM allocates devices at the end of the addressable space
+//  - Windows requires the addressable space size to be 64k aligned
+fn mmio_address_space_size(phys_bits: u8) -> u64 {
+    (1 << phys_bits) - (1 << 16)
+}
+
 #[cfg_attr(target_arch = "aarch64", allow(unused))]
 fn create_vmm_and_vcpus(
     instance_info: &InstanceInfo,
@@ -226,25 +372,69 @@ fn create_vmm_and_vcpus(
     use self::StartMicrovmError::*;
 
     // Set up Kvm Vm and register memory regions.
-    let mut vm = setup_kvm_vm(&guest_memory, track_dirty_pages)?;
+    let (mut vm, extra_fd) = setup_kvm_vm(&guest_memory, track_dirty_pages)?;
 
     let vcpus_exit_evt = EventFd::new(libc::EFD_NONBLOCK)
         .map_err(Error::EventFd)
         .map_err(Internal)?;
 
+    // Create a system resources allocator.
+    const NUM_IOAPIC_PINS: usize = 24;
+    const X86_64_IRQ_BASE: u32 = 5;
+
+    let allocator = Arc::new(Mutex::new(
+        SystemAllocator::new(
+            #[cfg(target_arch = "x86_64")]
+            {
+                GuestAddress(0)
+            },
+            #[cfg(target_arch = "x86_64")]
+            {
+                1 << 16
+            },
+            GuestAddress(0),
+            mmio_address_space_size(46),
+            GuestAddress(arch::MEM_32BIT_DEVICES_START),
+            arch::MEM_32BIT_DEVICES_SIZE,
+            #[cfg(target_arch = "x86_64")]
+            vec![GsiApic::new(
+                X86_64_IRQ_BASE,
+                NUM_IOAPIC_PINS as u32 - X86_64_IRQ_BASE,
+            )],
+        )
+        .unwrap()
+    ));
+
+    let vm_fd = Arc::new(Mutex::new(extra_fd));
+    // First we create the MSI interrupt manager, the legacy one is created
+    // later, after the IOAPIC device creation.
+    // The reason we create the MSI one first is because the IOAPIC needs it,
+    // and then the legacy interrupt manager needs an IOAPIC. So we're
+    // handling a linear dependency chain:
+    // msi_interrupt_manager <- IOAPIC <- legacy_interrupt_manager.
+    let msi_interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>> =
+        Arc::new(MsiInterruptManager::new(
+            Arc::clone(&allocator),
+            Arc::clone(&vm_fd),
+        ));
+
     // Instantiate the MMIO device manager.
     // 'mmio_base' address has to be an address which is protected by the kernel
     // and is architectural specific.
-    let mmio_device_manager =
+    let mut mmio_device_manager =
         MMIODeviceManager::new(arch::MMIO_MEM_START, (arch::IRQ_BASE, arch::IRQ_MAX));
 
     let vcpus;
+    let pci_root = PciRoot::new(None);
+    let pci_bus = PciBus::new(pci_root);
+
+    let pci_bus = Arc::new(Mutex::new(pci_bus));
+
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
-    let pio_device_manager = {
+    let mut pio_device_manager = {
         setup_interrupt_controller(&mut vm)?;
-        vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
 
         // Make stdout non blocking.
         set_stdout_nonblocking();
@@ -256,14 +446,40 @@ fn create_vmm_and_vcpus(
             Box::new(io::stdout()),
         )
         .map_err(Internal)?;
+
         // x86_64 uses the i8042 reset event as the Vmm exit event.
         let reset_evt = vcpus_exit_evt
             .try_clone()
             .map_err(Error::EventFd)
             .map_err(Internal)?;
-        create_pio_dev_manager_with_legacy_devices(&vm, serial_device, reset_evt)
+
+        let pci_config_io = Arc::new(Mutex::new(PciConfigIo::new(Arc::clone(&pci_bus))));
+
+        create_pio_dev_manager_with_legacy_devices(&vm, serial_device, reset_evt, pci_config_io)
             .map_err(Internal)?
     };
+
+    // Create passthru device for a GPU.
+    let device_fd = create_passthrough_device(vm.fd());
+
+    add_vfio_device(
+        Arc::clone(&vm_fd),
+        device_fd,
+        Arc::clone(&pci_bus),
+        &mut mmio_device_manager,
+        &mut pio_device_manager,
+        Arc::clone(&msi_interrupt_manager),
+        guest_memory.clone(),
+        Arc::clone(&allocator)
+    );
+    
+    vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
+    let pci_config_mmio = Arc::new(Mutex::new(PciConfigMmio::new(Arc::clone(&pci_bus))));
+    mmio_device_manager
+        .register_pci_bus(pci_config_mmio)
+        .unwrap();
+
+
 
     // On aarch64, the vCPUs need to be created (i.e call KVM_CREATE_VCPU) before setting up the
     // IRQ chip because the `KVM_CREATE_VCPU` ioctl will return error if the IRQCHIP
@@ -612,16 +828,19 @@ where
 pub(crate) fn setup_kvm_vm(
     guest_memory: &GuestMemoryMmap,
     track_dirty_pages: bool,
-) -> std::result::Result<Vm, StartMicrovmError> {
+) -> std::result::Result<(Vm, VmFd), StartMicrovmError> {
     use self::StartMicrovmError::Internal;
     let kvm = KvmContext::new()
         .map_err(Error::KvmContext)
         .map_err(Internal)?;
-    let mut vm = Vm::new(kvm.fd()).map_err(Error::Vm).map_err(Internal)?;
+
+    // TODO: undo hackery, we need to explore other options here.
+    let (mut vm, extra_fd) = Vm::new(kvm.fd()).map_err(Error::Vm).map_err(Internal)?;
+    
     vm.memory_init(&guest_memory, kvm.max_memslots(), track_dirty_pages)
         .map_err(Error::Vm)
         .map_err(Internal)?;
-    Ok(vm)
+    Ok((vm, extra_fd))
 }
 
 /// Sets up the irqchip for a x86_64 microVM.
@@ -673,9 +892,10 @@ fn create_pio_dev_manager_with_legacy_devices(
     vm: &Vm,
     serial: Arc<Mutex<devices::legacy::Serial>>,
     i8042_reset_evfd: EventFd,
+    pci_bus: Arc<Mutex<dyn BusDevice>>,
 ) -> std::result::Result<PortIODeviceManager, super::Error> {
-    let mut pio_dev_mgr =
-        PortIODeviceManager::new(serial, i8042_reset_evfd).map_err(Error::CreateLegacyDevice)?;
+    let mut pio_dev_mgr = PortIODeviceManager::new(serial, i8042_reset_evfd, pci_bus)
+        .map_err(Error::CreateLegacyDevice)?;
     pio_dev_mgr
         .register_devices(vm.fd())
         .map_err(Error::LegacyIOBus)?;

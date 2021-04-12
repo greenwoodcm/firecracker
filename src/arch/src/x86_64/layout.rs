@@ -29,3 +29,15 @@ pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
 
 /// The 'zero page', a.k.a linux kernel bootparams.
 pub const ZERO_PAGE_START: u64 = 0x7000;
+
+// ** 32-bit reserved area (start: 3GiB, length: 1GiB) **
+pub const MEM_32BIT_RESERVED_START: u64 = 0xc000_0000;
+pub const MEM_32BIT_RESERVED_SIZE: u64 = 1024 << 20;
+
+// Sub range: 32-bit PCI devices (start: 3GiB, length: 640Mib)
+pub const MEM_32BIT_DEVICES_START: u64 = MEM_32BIT_RESERVED_START;
+pub const MEM_32BIT_DEVICES_SIZE: u64 = 640 << 20;
+
+// PCI MMCONFIG space (start: after the device space, length: 256MiB)
+pub const PCI_MMCONFIG_START: u64 = MEM_32BIT_DEVICES_START + MEM_32BIT_DEVICES_SIZE;
+pub const PCI_MMCONFIG_SIZE: u64 = 256 << 20;

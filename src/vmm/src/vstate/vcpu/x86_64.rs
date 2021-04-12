@@ -398,14 +398,18 @@ impl KvmVcpu {
         match exit {
             VcpuExit::IoIn(addr, data) => {
                 if let Some(pio_bus) = &self.pio_bus {
-                    pio_bus.read(u64::from(addr), data);
+                    if !pio_bus.read(u64::from(addr), data) {
+                        error!("Unhandled PIO read {:x}", addr);
+                    }
                     METRICS.vcpu.exit_io_in.inc();
                 }
                 Ok(VcpuEmulation::Handled)
             }
             VcpuExit::IoOut(addr, data) => {
                 if let Some(pio_bus) = &self.pio_bus {
-                    pio_bus.write(u64::from(addr), data);
+                    if !(pio_bus.write(u64::from(addr), data)) {
+                        error!("Unhandled PIO write {:x}", addr);
+                    }
                     METRICS.vcpu.exit_io_out.inc();
                 }
                 Ok(VcpuEmulation::Handled)

@@ -457,14 +457,18 @@ impl Vcpu {
             Ok(run) => match run {
                 VcpuExit::MmioRead(addr, data) => {
                     if let Some(mmio_bus) = &self.kvm_vcpu.mmio_bus {
-                        mmio_bus.read(addr, data);
+                        if !(mmio_bus.read(addr, data)) {
+                            error!("Unhandled mmio read at {:x}", addr);
+                        }
                         METRICS.vcpu.exit_mmio_read.inc();
                     }
                     Ok(VcpuEmulation::Handled)
                 }
                 VcpuExit::MmioWrite(addr, data) => {
                     if let Some(mmio_bus) = &self.kvm_vcpu.mmio_bus {
-                        mmio_bus.write(addr, data);
+                        if !mmio_bus.write(addr, data) {
+                            error!("Unhandled mmio write at {:x}", addr);
+                        }
                         METRICS.vcpu.exit_mmio_write.inc();
                     }
                     Ok(VcpuEmulation::Handled)

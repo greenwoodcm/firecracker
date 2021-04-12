@@ -26,7 +26,7 @@ impl BusDevice for RTCDevice {
         }
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) {
+    fn write(&mut self, _:u64, offset: u64, data: &[u8]) {
         if data.len() == 4 {
             // write() function from RTC implementation expects a slice of
             // len 4, and we just validated that this is the data length

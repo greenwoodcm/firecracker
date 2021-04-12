@@ -23,9 +23,9 @@ use crate::virtio::AsAny;
 #[allow(unused_variables)]
 pub trait BusDevice: AsAny + Send {
     /// Reads at `offset` from this device
-    fn read(&mut self, offset: u64, data: &mut [u8]) {}
+    fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {}
     /// Writes at `offset` into this device
-    fn write(&mut self, offset: u64, data: &[u8]) {}
+    fn write(&mut self, base: u64, offset: u64, data: &[u8]) {}
     /// Triggers the `irq_mask` interrupt on this device
     fn interrupt(&self, irq_mask: u32) -> io::Result<()> {
         Ok(())
@@ -100,11 +100,11 @@ impl Bus {
         None
     }
 
-    pub fn get_device(&self, addr: u64) -> Option<(u64, &Mutex<dyn BusDevice>)> {
+    pub fn get_device(&self, addr: u64) -> Option<(u64, u64, &Mutex<dyn BusDevice>)> {
         if let Some((BusRange(start, len), dev)) = self.first_before(addr) {
             let offset = addr - start;
             if offset < len {
-                return Some((offset, dev));
+                return Some((start, offset, dev));
             }
         }
         None
@@ -144,11 +144,11 @@ impl Bus {
     ///
     /// Returns true on success, otherwise `data` is untouched.
     pub fn read(&self, addr: u64, data: &mut [u8]) -> bool {
-        if let Some((offset, dev)) = self.get_device(addr) {
+        if let Some((base, offset, dev)) = self.get_device(addr) {
             // OK to unwrap as lock() failing is a serious error condition and should panic.
             dev.lock()
                 .expect("Failed to acquire device lock")
-                .read(offset, data);
+                .read(base, offset, data);
             true
         } else {
             false
@@ -159,11 +159,11 @@ impl Bus {
     ///
     /// Returns true on success, otherwise `data` is untouched.
     pub fn write(&self, addr: u64, data: &[u8]) -> bool {
-        if let Some((offset, dev)) = self.get_device(addr) {
+        if let Some((base, offset, dev)) = self.get_device(addr) {
             // OK to unwrap as lock() failing is a serious error condition and should panic.
             dev.lock()
                 .expect("Failed to acquire device lock")
-                .write(offset, data);
+                .write(base, offset, data);
             true
         } else {
             false

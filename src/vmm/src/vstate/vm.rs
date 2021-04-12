@@ -22,6 +22,7 @@ use kvm_bindings::{
 };
 use kvm_bindings::{kvm_userspace_memory_region, KVM_MEM_LOG_DIRTY_PAGES};
 use kvm_ioctls::{Kvm, VmFd};
+use std::os::unix::io::AsRawFd;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
@@ -123,10 +124,9 @@ pub struct Vm {
 
 impl Vm {
     /// Constructs a new `Vm` using the given `Kvm` instance.
-    pub fn new(kvm: &Kvm) -> Result<Self> {
+    pub fn new(kvm: &Kvm) -> Result<(Self, VmFd)> {
         // Create fd for interacting with kvm-vm specific functions.
         let vm_fd = kvm.create_vm().map_err(Error::VmFd)?;
-
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         let supported_cpuid = kvm
             .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
@@ -134,16 +134,20 @@ impl Vm {
         #[cfg(target_arch = "x86_64")]
         let supported_msrs =
             arch::x86_64::msr::supported_guest_msrs(kvm).map_err(Error::GuestMSRs)?;
-
-        Ok(Vm {
-            fd: vm_fd,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            supported_cpuid,
-            #[cfg(target_arch = "x86_64")]
-            supported_msrs,
-            #[cfg(target_arch = "aarch64")]
-            irqchip_handle: None,
-        })
+        let rawfd = unsafe { libc::dup(vm_fd.as_raw_fd()) };
+        let extra_fd = unsafe { kvm.create_vmfd_from_rawfd(rawfd).unwrap() };
+        Ok((
+            Vm {
+                fd: vm_fd,
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                supported_cpuid,
+                #[cfg(target_arch = "x86_64")]
+                supported_msrs,
+                #[cfg(target_arch = "aarch64")]
+                irqchip_handle: None,
+            },
+            extra_fd,
+        ))
     }
 
     /// Returns a ref to the supported `CpuId` for this Vm.

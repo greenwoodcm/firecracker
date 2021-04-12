@@ -198,7 +198,7 @@ impl I8042Device {
 }
 
 impl BusDevice for I8042Device {
-    fn read(&mut self, offset: u64, data: &mut [u8]) {
+    fn read(&mut self, _: u64, offset: u64, data: &mut [u8]) {
         // All our ports are byte-wide. We don't know how to handle any wider data.
         if data.len() != 1 {
             METRICS.i8042.missed_read_count.inc();
@@ -232,7 +232,7 @@ impl BusDevice for I8042Device {
         }
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) {
+    fn write(&mut self, _: u64, offset: u64, data: &[u8]) {
         // All our ports are byte-wide. We don't know how to handle any wider data.
         if data.len() != 1 {
             METRICS.i8042.missed_write_count.inc();

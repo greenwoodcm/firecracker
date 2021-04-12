@@ -9,6 +9,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use devices::BusDevice;
 use kvm_ioctls::VmFd;
 use utils::eventfd::EventFd;
 
@@ -41,6 +42,7 @@ pub struct PortIODeviceManager {
     pub io_bus: devices::Bus,
     pub stdio_serial: Arc<Mutex<devices::legacy::Serial>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
+    pub pci_bus: Arc<Mutex<dyn BusDevice>>,
 
     pub com_evt_1_3: EventFd,
     pub com_evt_2_4: EventFd,
@@ -52,6 +54,7 @@ impl PortIODeviceManager {
     pub fn new(
         serial: Arc<Mutex<devices::legacy::Serial>>,
         i8042_reset_evfd: EventFd,
+        pci_bus: Arc<Mutex<dyn BusDevice>>,
     ) -> Result<Self> {
         let io_bus = devices::Bus::new();
         let com_evt_1_3 = serial
@@ -72,6 +75,7 @@ impl PortIODeviceManager {
             io_bus,
             stdio_serial: serial,
             i8042,
+            pci_bus,
             com_evt_1_3,
             com_evt_2_4,
             kbd_evt,
@@ -80,6 +84,10 @@ impl PortIODeviceManager {
 
     /// Register supported legacy devices.
     pub fn register_devices(&mut self, vm_fd: &VmFd) -> Result<()> {
+        self.io_bus
+            .insert(Arc::clone(&self.pci_bus), 0xcf8, 0x8)
+            .map_err(Error::BusError)?;
+
         self.io_bus
             .insert(self.stdio_serial.clone(), 0x3f8, 0x8)
             .map_err(Error::BusError)?;
