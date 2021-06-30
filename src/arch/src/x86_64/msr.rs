@@ -182,6 +182,10 @@ pub fn msr_should_serialize(index: u32) -> bool {
     ALLOWED_MSR_RANGES.iter().any(|range| range.contains(index))
 }
 
+// MTRR constants
+pub const MTRR_ENABLE: u64 = 0x800; // IA32_MTRR_DEF_TYPE MSR: E (MTRRs enabled) flag, bit 11
+pub const MTRR_MEM_TYPE_WB: u64 = 0x6; // Default - writeback memory
+
 // Creates and populates required MSR entries for booting Linux on X86_64.
 fn create_boot_msr_entries() -> Vec<kvm_msr_entry> {
     let msr_entry_default = |msr| kvm_msr_entry {
@@ -205,6 +209,11 @@ fn create_boot_msr_entries() -> Vec<kvm_msr_entry> {
         kvm_msr_entry {
             index: MSR_IA32_MISC_ENABLE,
             data: u64::from(MSR_IA32_MISC_ENABLE_FAST_STRING),
+            ..Default::default()
+        },
+        kvm_msr_entry {
+            index: MSR_MTRRdefType,
+            data: u64::from(MTRR_ENABLE | MTRR_MEM_TYPE_WB),
             ..Default::default()
         },
     ]
