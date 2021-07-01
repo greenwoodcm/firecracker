@@ -195,6 +195,31 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /device:
+    put:
+      summary: Configure a VFIO device
+      description:
+        Creates a new vfio device if one does not already exist, otherwise updates it.
+      operationId: putVfioDevice
+      parameters:
+        - name: body
+          in: body
+          description: Vfio device configuration.
+          required: true
+          schema:
+            $ref: "#/definitions/VfioDevice"
+      responses:
+        204:
+          description: VFIO device configured
+        400:
+          description: VFIO device cannot be attached because of an error.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/Error"
+
   /drives/{drive_id}:
     put:
       summary: Creates or updates a drive. Pre-boot only.
@@ -743,6 +768,17 @@ definitions:
       - C3
       - T2
 
+ VfioDevice:
+    type: object
+    required:
+      - path
+    description:
+      VFIO decice configuration
+    properties:
+      path:
+        type: string
+        description: Host level path of the VFIO device like /sys/bus/pci/devices/0000:18:00.0/
+  
   Drive:
     type: object
     required:
