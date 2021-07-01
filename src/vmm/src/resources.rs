@@ -15,6 +15,7 @@ use crate::vmm_config::logger::{init_logger, LoggerConfig, LoggerConfigError};
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError, DEFAULT_MEM_SIZE_MIB};
 use crate::vmm_config::metrics::{init_metrics, MetricsConfig, MetricsConfigError};
 use crate::vmm_config::mmds::{MmdsConfig, MmdsConfigError};
+use crate::vmm_config::device::VfioDeviceConfig;
 use crate::vmm_config::net::*;
 use crate::vmm_config::vsock::*;
 use crate::vstate::vcpu::VcpuConfig;
@@ -93,6 +94,8 @@ pub struct VmResources {
     pub mmds_config: Option<MmdsConfig>,
     /// Whether or not to load boot timer device.
     pub boot_timer: bool,
+    /// VFIO device, like a host GPU for example.
+    pub vfio_device_config: Option<VfioDeviceConfig>,
 }
 
 impl VmResources {
@@ -327,6 +330,11 @@ impl VmResources {
     /// Sets a vsock device to be attached when the VM starts.
     pub fn set_vsock_device(&mut self, config: VsockDeviceConfig) -> Result<VsockConfigError> {
         self.vsock.insert(config)
+    }
+
+    /// Set the vfio device configuration.
+    pub fn set_vfio_device_config(&mut self, config: VfioDeviceConfig) { 
+        self.vfio_device_config = Some(config);
     }
 
     /// Setter for mmds config.

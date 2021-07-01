@@ -61,6 +61,7 @@ use vm_device::interrupt::{
 };
 use vm_allocator::SystemAllocator;
 use vm_allocator::GsiApic;
+use crate::vmm_config::device::VfioDeviceConfig;
 
 
 /// Errors associated with starting the instance.
@@ -250,7 +251,8 @@ fn add_vfio_device(
     pio_manager: &mut PortIODeviceManager,
     interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
     memory: GuestMemoryMmap,
-    allocator: Arc<Mutex<SystemAllocator>>
+    allocator: Arc<Mutex<SystemAllocator>>,
+    vfio_device_config: VfioDeviceConfig
 ) {
     // We need to shift the device id since the 3 first bits
     // are dedicated to the PCI function, and we know we don't
@@ -282,10 +284,7 @@ fn add_vfio_device(
         VfioContainer::new(Arc::new(unsafe { DeviceFd::from_raw_fd(dup_device_fd) })).unwrap(),
     );
     let vfio_device = VfioDevice::new(
-        // T4 GPU on g4dn.metal intance.
-        // Path::new("/sys/bus/pci/drivers/vfio-pci/0000:18:00.0"),
-        Path::new("/sys/bus/pci/devices/0000:18:00.0/"),
-        // Path::new("/sys/bus/pci/drivers/vfio-pci/0000:bf:00.1"),
+        Path::new(&vfio_device_config.path),
         Arc::clone(&vfio_container),
     )
     .unwrap();
@@ -368,6 +367,7 @@ fn create_vmm_and_vcpus(
     guest_memory: GuestMemoryMmap,
     track_dirty_pages: bool,
     vcpu_count: u8,
+    vfio_device_config: Option<VfioDeviceConfig>,
 ) -> std::result::Result<(Vmm, Vec<Vcpu>), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
@@ -459,20 +459,24 @@ fn create_vmm_and_vcpus(
             .map_err(Internal)?
     };
 
-    // Create passthru device for a GPU.
-    let device_fd = create_passthrough_device(vm.fd());
 
-    add_vfio_device(
-        Arc::clone(&vm_fd),
-        device_fd,
-        Arc::clone(&pci_bus),
-        &mut mmio_device_manager,
-        &mut pio_device_manager,
-        Arc::clone(&msi_interrupt_manager),
-        guest_memory.clone(),
-        Arc::clone(&allocator)
-    );
-    
+
+    if vfio_device_config.is_some() {
+        // Create passthru device for a GPU.
+        let device_fd = create_passthrough_device(vm.fd());
+        add_vfio_device(
+            Arc::clone(&vm_fd),
+            device_fd,
+            Arc::clone(&pci_bus),
+            &mut mmio_device_manager,
+            &mut pio_device_manager,
+            Arc::clone(&msi_interrupt_manager),
+            guest_memory.clone(),
+            Arc::clone(&allocator),
+            vfio_device_config.unwrap()
+        );    
+    }
+
     vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
     let pci_config_mmio = Arc::new(Mutex::new(PciConfigMmio::new(Arc::clone(&pci_bus))));
     mmio_device_manager
@@ -547,6 +551,7 @@ pub fn build_microvm_for_boot(
         guest_memory,
         track_dirty_pages,
         vcpu_config.vcpu_count,
+        vm_resources.vfio_device_config.clone(),
     )?;
 
     // The boot timer device needs to be the first device attached in order
@@ -643,6 +648,7 @@ pub fn build_microvm_from_snapshot(
         guest_memory.clone(),
         track_dirty_pages,
         vcpu_count,
+        None
     )?;
 
     #[cfg(target_arch = "x86_64")]

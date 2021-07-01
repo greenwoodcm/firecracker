@@ -30,6 +30,8 @@ use crate::vmm_config::net::{
 use crate::vmm_config::snapshot::{CreateSnapshotParams, LoadSnapshotParams, SnapshotType};
 use crate::vmm_config::vsock::{VsockConfigError, VsockDeviceConfig};
 use crate::vmm_config::{self, RateLimiterUpdate};
+use crate::vmm_config::device::VfioDeviceConfig;
+
 use crate::{builder::StartMicrovmError, EventManager};
 use crate::{ExitCode, FC_EXIT_CODE_BAD_CONFIGURATION};
 use logger::{info, update_metric_with_elapsed_time, METRICS};
@@ -109,6 +111,8 @@ pub enum VmmAction {
     /// Update a network interface, after microVM start. Currently, the only updatable properties
     /// are the RX and TX rate limiters.
     UpdateNetworkInterface(NetworkInterfaceUpdateConfig),
+    /// Attach a VFIO device.
+    SetVfioDevice(VfioDeviceConfig),
 }
 
 /// Wrapper for all errors associated with VMM actions.
@@ -333,6 +337,8 @@ impl<'a> PrebootApiController<'a> {
             | UpdateNetworkInterface(_) => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(target_arch = "x86_64")]
             SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
+            #[cfg(target_arch = "x86_64")]
+            SetVfioDevice(device) => { self.set_vfio_device(device); Ok(VmmData::Empty)}
         }
     }
 
@@ -398,6 +404,10 @@ impl<'a> PrebootApiController<'a> {
             .set_vsock_device(cfg)
             .map(|()| VmmData::Empty)
             .map_err(VmmActionError::VsockConfig)
+    }
+
+    fn set_vfio_device(&mut self, cfg: VfioDeviceConfig) {
+        self.vm_resources.set_vfio_device_config(cfg);
     }
 
     // On success, this command will end the pre-boot stage and this controller
@@ -530,6 +540,7 @@ impl RuntimeApiController {
             | SetVsockDevice(_)
             | SetMmdsConfiguration(_)
             | SetVmConfiguration(_)
+            | SetVfioDevice(_)
             | StartMicroVm => Err(VmmActionError::OperationNotSupportedPostBoot),
         }
     }

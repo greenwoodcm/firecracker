@@ -8,6 +8,7 @@ use super::VmmData;
 use crate::request::actions::parse_put_actions;
 use crate::request::balloon::{parse_get_balloon, parse_patch_balloon, parse_put_balloon};
 use crate::request::boot_source::parse_put_boot_source;
+use crate::request::device::parse_put_device;
 use crate::request::drive::{parse_patch_drive, parse_put_drive};
 use crate::request::instance_info::parse_get_instance_info;
 use crate::request::logger::parse_put_logger;
@@ -20,6 +21,7 @@ use crate::request::net::{parse_patch_net, parse_put_net};
 use crate::request::snapshot::parse_patch_vm_state;
 use crate::request::snapshot::parse_put_snapshot;
 use crate::request::vsock::parse_put_vsock;
+
 use crate::ApiServer;
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
 
@@ -76,6 +78,7 @@ impl ParsedRequest {
             (Method::Put, "shutdown-internal", None) => Ok(ParsedRequest::ShutdownInternal),
             (Method::Put, "snapshot", Some(body)) => parse_put_snapshot(body, path_tokens.get(1)),
             (Method::Put, "vsock", Some(body)) => parse_put_vsock(body),
+            (Method::Put, "device", Some(body)) => parse_put_device(body),
             (Method::Put, _, None) => method_to_error(Method::Put),
             (Method::Patch, "balloon", Some(body)) => parse_patch_balloon(body, path_tokens.get(1)),
             (Method::Patch, "drives", Some(body)) => parse_patch_drive(body, path_tokens.get(1)),

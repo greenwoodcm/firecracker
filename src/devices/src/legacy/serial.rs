@@ -357,7 +357,7 @@ impl Serial {
 }
 
 impl BusDevice for Serial {
-    fn read(&mut self,_:u64, offset: u64, data: &mut [u8]) {
+    fn read(&mut self, _: u64, offset: u64, data: &mut [u8]) {
         if data.len() != 1 {
             METRICS.uart.missed_read_count.inc();
             return;
