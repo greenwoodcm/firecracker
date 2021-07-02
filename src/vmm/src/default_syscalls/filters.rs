@@ -82,14 +82,8 @@ pub fn default_filter() -> Result<SeccompFilter, Error> {
             allow_syscall(libc::SYS_lseek),
             // Triggered by musl for some customer workloads
             #[cfg(target_env = "musl")]
-            allow_syscall_if(
-                libc::SYS_madvise,
-                or![and![Cond::new(
-                    2,
-                    ArgLen::DWORD,
-                    Eq,
-                    libc::MADV_DONTNEED as u64
-                )?],],
+            allow_syscall(
+                libc::SYS_madvise
             ),
             // Used for re-allocating large memory regions, for example vectors
             allow_syscall(libc::SYS_mremap),

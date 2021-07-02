@@ -193,6 +193,17 @@ impl SnapshotMemory for GuestMemoryMmap {
             .map_err(Error::CreateRegion)?
             .map_err(Error::CreateMemory)?;
 
+            
+            let result = unsafe {
+                libc::madvise(
+                    mmap_region.as_ptr() as *mut libc::c_void,
+                    mmap_region.size(),
+                    libc::MADV_RANDOM,
+                )
+            };
+
+            assert_eq!(result, 0);
+
             mmap_regions.push(mmap_region);
         }
 
