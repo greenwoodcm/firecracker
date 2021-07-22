@@ -24,6 +24,7 @@ pub mod resources;
 pub mod rpc_interface;
 /// Signal handling utilities.
 pub mod signal_handler;
+pub mod uffd_config;
 /// microVM state versions.
 pub mod version_map;
 /// Wrappers over structures used to configure the VMM.

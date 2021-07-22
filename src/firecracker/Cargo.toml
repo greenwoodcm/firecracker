@@ -11,6 +11,7 @@ timerfd = ">=1.0"
 
 api_server = { path = "../api_server" }
 logger = { path = "../logger" }
+memory_model = { path = "../memory_model" }
 mmds = { path = "../mmds" }
 polly = { path = "../polly" }
 seccomp = { path = "../seccomp" }

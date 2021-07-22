@@ -24,6 +24,7 @@ polly = { path = "../polly" }
 rate_limiter = { path = "../rate_limiter" }
 seccomp = { path = "../seccomp" }
 snapshot = { path = "../snapshot"}
+uffd = { path = "../uffd" }
 utils = { path = "../utils" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

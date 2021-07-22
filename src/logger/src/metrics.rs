@@ -611,6 +611,15 @@ pub struct SignalMetrics {
     pub sigill: SharedIncMetric,
 }
 
+/// Dummy comment.
+#[derive(Default, Serialize)]
+pub struct UffdMetrics {
+    /// Dummy comment.
+    pub total_faults: SharedIncMetric,
+    /// Dummy comment.
+    pub write_faults: SharedIncMetric,
+}
+
 /// Metrics specific to VCPUs' mode of functioning.
 #[derive(Default, Serialize)]
 pub struct VcpuMetrics {
@@ -732,6 +741,8 @@ pub struct FirecrackerMetrics {
     pub uart: SerialDeviceMetrics,
     /// Metrics related to signals.
     pub signals: SignalMetrics,
+    /// Dummy comment.
+    pub uffd: UffdMetrics,
     /// Metrics related to virtio-vsockets.
     pub vsock: VsockDeviceMetrics,
 }

@@ -99,6 +99,16 @@ fn main() {
                 .help("Process start CPU time (wall clock, microseconds)."),
         )
         .arg(
+            Argument::new("uffd-pseudo-page-size")
+                .takes_value(true)
+                .required(false),
+        )
+        .arg(
+            Argument::new("hugepages")
+                .takes_value(false)
+                .required(false),
+        )
+        .arg(
             Argument::new("config-file")
                 .takes_value(true)
                 .help("Path to a file that contains the microVM configuration in JSON format."),
@@ -206,7 +216,9 @@ fn main() {
     }
 
     // It's safe to unwrap here because the field's been provided with a default value.
-    let seccomp_level = arguments.single_value("seccomp-level").unwrap();
+    // let seccomp_level = arguments.single_value("seccomp-level").unwrap();
+    // Disabling seccomp for UFFD experiments.
+    let seccomp_level = "0";
     let seccomp_filter = get_seccomp_filter(
         SeccompLevel::from_string(&seccomp_level).unwrap_or_else(|err| {
             panic!("Invalid value for seccomp-level: {}", err);
@@ -223,6 +235,17 @@ fn main() {
 
     let boot_timer_enabled = arguments.flag_present("boot-timer");
     let api_enabled = !arguments.flag_present("no-api");
+
+    if let Some(uffd_pseudo_page_size) = arguments.single_value("uffd-pseudo-page-size") {
+        vmm::uffd_config::set_pseudo_page_size(uffd_pseudo_page_size
+                .parse::<u64>()
+                .unwrap(),
+        );
+    }
+
+    if arguments.flag_present("hugepages") {
+        memory_model::set_use_huge_pages(true);
+    }
 
     if api_enabled {
         let bind_path = arguments

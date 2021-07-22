@@ -1,0 +1,16 @@
+[package]
+name = "uffd"
+version = "0.1.0"
+authors = ["Alexandru Agache <aagch@amazon.com>"]
+edition = "2018"
+build = "../../build.rs"
+
+[[bin]]
+name = "uffd"
+path = "src/main.rs"
+
+[dependencies]
+libc = ">=0.2.59"
+
+logger = { path = "../logger" }
+utils = { path = "../utils" }
